@@ -8,6 +8,10 @@ void setup() {
   u8g2.setPowerSave(1);  /* OLED power off */
 }
 
+static bool inline ButtonPressed() {
+ return digitalRead(D8) == HIGH;
+}
+
 bool SelectOption(char *opt) {
   for (int i = 0; i < 4; ++i) {
     u8g2.firstPage();
@@ -17,27 +21,77 @@ bool SelectOption(char *opt) {
     } while( u8g2.nextPage());
     for (int j = 0; j < 5; ++j) {
       delay(100);
-    if (digitalRead(D8) == HIGH)
+    if (ButtonPressed())
       return true;
     }
   }
   return false;
 }
 
+void ActivatePump(long *level_reached_msec, long *pump_off_msec) {
+  pinMode(D5, INPUT);
+
+  uint32_t start_millis = millis();
+  uint32_t end_millis = start_millis + 50 * 1000;
+  digitalWrite(D7, LOW);
+  pinMode(D7, OUTPUT);
+  while (int32_t(millis() - end_millis) < 0) {
+    delay(10);
+    if (ButtonPressed())
+      break;
+    if (digitalRead(D5) == HIGH) {
+      if (level_reached_msec)
+        *level_reached_msec = long(millis() - start_millis);
+      break;
+    }
+  }
+  pinMode(D7, INPUT);
+  if (pump_off_msec)
+    *pump_off_msec = long(millis() - start_millis);
+}
+
+void ActivateFeeder(unsigned msec) {
+  digitalWrite(D6, LOW);
+  pinMode(D6, OUTPUT);
+  unsigned long start = millis();
+  do {
+    delay(100);
+    if (ButtonPressed())
+      break;
+  } while (millis() - start < msec);
+  pinMode(D6, INPUT);
+  delay(1000);
+}
+
 void RunPump() {
   u8g2.firstPage();
   do {
-    u8g2.drawStr(0, 0, "Running Pump");
+    u8g2.drawStr(0, 0, "Running Pump until full");
+    u8g2.drawStr(0, 16, "Press Button to terminate early");
   } while(u8g2.nextPage());
   delay(1000);
+  long pump_off_ms, level_reached_ms = -1;
+  ActivatePump(&level_reached_ms, &pump_off_ms);
+  u8g2.firstPage();
+  char msg1[32];
+  char msg2[32];
+  sprintf(msg1, "Level reached %ld", level_reached_ms);
+  sprintf(msg2, "Pump off %ld", pump_off_ms);
+  do {
+    u8g2.drawStr(0, 16, msg1);
+    u8g2.drawStr(0, 26, msg2);
+  } while(u8g2.nextPage());
+  delay(500);
+  do {delay(100); } while(!ButtonPressed());
 }
 
 void RunFeeder() {
   u8g2.firstPage();
   do {
-    u8g2.drawStr(0, 0, "Running Feeder");
+    u8g2.drawStr(0, 0, "Running Feeder 2 Min.");
+    u8g2.drawStr(0, 16, "Press Button to terminate early");
   } while( u8g2.nextPage());
-  delay(1000);
+  ActivateFeeder(10000);
 }
 
 void ShowInformation() {
@@ -47,7 +101,8 @@ void ShowInformation() {
   do {
     u8g2.drawStr(0, 0, buf);
   } while( u8g2.nextPage());
-  delay(1000);
+  delay(500);
+  do {delay(100); } while(!ButtonPressed());
 }
 
 void Interactive() {
@@ -70,8 +125,9 @@ void Interactive() {
 }
 
 void loop() {
-  if (digitalRead(D8) == LOW)
+  if (ButtonPressed()) {
+    delay(150); /* debounce */
+    Interactive();
     return;
-  Interactive();
-  delay(150);
+  }
 }
