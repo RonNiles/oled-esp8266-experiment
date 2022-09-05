@@ -12,6 +12,30 @@ static bool inline ButtonPressed() {
  return digitalRead(D8) == HIGH;
 }
 
+static void inline WaitButtonReleased() {
+  int countdown = 0;
+  for (;;) {
+    if (ButtonPressed()) {
+      countdown = 0;
+    } else if (++countdown > 4) {
+      break;
+    }
+    delay(50);
+  }
+}
+
+static void inline WaitButtonPressed() {
+  int countdown = 0;
+  for (;;) {
+    if (!ButtonPressed()) {
+      countdown = 0;
+    } else if (++countdown > 4) {
+      break;
+    }
+    delay(50);
+  }
+}
+
 bool SelectOption(char *opt) {
   for (int i = 0; i < 4; ++i) {
     u8g2.firstPage();
@@ -21,8 +45,8 @@ bool SelectOption(char *opt) {
     } while( u8g2.nextPage());
     for (int j = 0; j < 5; ++j) {
       delay(100);
-    if (ButtonPressed())
-      return true;
+      if (ButtonPressed())
+        return true;
     }
   }
   return false;
@@ -64,12 +88,12 @@ void ActivateFeeder(unsigned msec) {
 }
 
 void RunPump() {
+  WaitButtonReleased();
   u8g2.firstPage();
   do {
     u8g2.drawStr(0, 0, "Running Pump until full");
     u8g2.drawStr(0, 16, "Press Button to terminate early");
   } while(u8g2.nextPage());
-  delay(1000);
   long pump_off_ms, level_reached_ms = -1;
   ActivatePump(&level_reached_ms, &pump_off_ms);
   u8g2.firstPage();
@@ -81,11 +105,12 @@ void RunPump() {
     u8g2.drawStr(0, 16, msg1);
     u8g2.drawStr(0, 26, msg2);
   } while(u8g2.nextPage());
-  delay(500);
-  do {delay(100); } while(!ButtonPressed());
+  WaitButtonReleased();
+  WaitButtonPressed();
 }
 
 void RunFeeder() {
+  WaitButtonReleased();
   u8g2.firstPage();
   do {
     u8g2.drawStr(0, 0, "Running Feeder 2 Min.");
@@ -95,24 +120,25 @@ void RunFeeder() {
 }
 
 void ShowInformation() {
+  WaitButtonReleased();
   char buf[64];
   sprintf(buf, "Millis: %lu\n", millis());
   u8g2.firstPage();
   do {
     u8g2.drawStr(0, 0, buf);
   } while( u8g2.nextPage());
-  delay(500);
-  do {delay(100); } while(!ButtonPressed());
+  WaitButtonPressed();
 }
 
 void Interactive() {
-  u8g2.setPowerSave(0);  /* OLED power on */
   u8g2.setFont(u8g2_font_6x10_tf);
   u8g2.setFontRefHeightExtendedText();
   u8g2.setDrawColor(1);
   u8g2.setFontPosTop();
   u8g2.setFontDirection(0);
 
+  WaitButtonReleased();
+  u8g2.setPowerSave(0);  /* OLED power on */
   if (SelectOption("Pump Manual Control")) {
     RunPump();
   } else if (SelectOption("Feeder Manual Control")) {
@@ -120,7 +146,7 @@ void Interactive() {
   } else if (SelectOption("Show Information")) {
     ShowInformation();
   }
-
+  WaitButtonReleased();
   u8g2.setPowerSave(1);  /* OLED power off */
 }
 
