@@ -2,7 +2,16 @@
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 
+#include <set>
+
 U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE);   // All Boards without Reset of the DispcdIcon  
+
+struct JobTime {
+  unsigned hour;
+  unsigned minute;
+};
+
+JobTime jobs[] = {{8, 40}, {13, 0}, {17, 30}};
 
 #ifndef STASSID
 #define STASSID "ssid"
@@ -59,6 +68,46 @@ uint32_t GuessCurrentTime() {
   return now;
 }
 
+static std::set<uint32_t> pending_jobs;
+
+static char report[256];
+static int report_ptr = 0;
+
+void WriteReport(char *ptr) {
+  if (report_ptr >= sizeof(report)) return;
+  int len = snprintf(report + report_ptr, sizeof(report) - report_ptr,
+    "%s", ptr);
+  report_ptr += len;
+}
+
+void WriteReport(int32_t val) {
+  if (report_ptr >= sizeof(report)) return;
+  int len = snprintf(report + report_ptr, sizeof(report) - report_ptr,
+    "%d", val);
+  report_ptr += len;
+}
+
+void RepopulateJobs(uint32_t newer_than) {
+  uint32_t now = GuessCurrentTime();
+  uint32_t past = now % 86400;
+  uint32_t last_day = now - past;
+  for (const JobTime &job : jobs) {
+    uint32_t next_job = last_day;
+    next_job += uint32_t(job.minute) * 60;
+    next_job += uint32_t(job.hour) * 60 * 60;
+    if (next_job > newer_than)
+      pending_jobs.insert(next_job);
+    next_job += 86400;
+    if (next_job > newer_than)
+      pending_jobs.insert(next_job);
+  }
+  WriteReport("Jobs in");
+  for (uint32_t job : pending_jobs) {
+    WriteReport(" ");
+    WriteReport(int32_t(job - now));
+  }
+  WriteReport("\n");
+}
 
 IPAddress timeServerIP; // time.nist.gov NTP server address
 const char* ntpServerName = "10.0.0.14"; //"time.nist.gov";
@@ -128,15 +177,10 @@ void sendNTPpacket(IPAddress& address) {
   udp.endPacket();
 }
 
-void GetNtpTime() {
-  time_valid = false;
+void UpdateTime() {
   unsigned long duration = millis();
   EnableWifi();
   duration = millis() - duration;
-  char msg1[22];
-  char msg2[22];
-  snprintf(msg1, sizeof(msg1), "Wifi %s in %lu", wifi_enabled ? "OK" : "Fail", duration);
-  u8g2.firstPage(); do { u8g2.drawStr(0, 0, msg1); } while( u8g2.nextPage());
   if (!wifi_enabled) return;
   udp.begin(localPort);
 
@@ -153,8 +197,6 @@ void GetNtpTime() {
     udp_len = udp.read(packetBuffer, NTP_PACKET_SIZE); // read the packet into the buffer
     break;
   }
-  snprintf(msg2, sizeof(msg2), "udp_len: %d", udp_len);
-  u8g2.firstPage(); do { u8g2.drawStr(0, 0, msg1); u8g2.drawStr(0, 16, msg2); } while (u8g2.nextPage());
 
   if (udp_len >= 44) {
     unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
@@ -169,13 +211,59 @@ void GetNtpTime() {
     last_millis = millis_now;
     time_valid = true;
   }
-  if (time_valid) {
-    snprintf(msg2, sizeof(msg2), "time_t: %lu", last_time_t);
-  u8g2.firstPage(); do { u8g2.drawStr(0, 0, msg1); u8g2.drawStr(0, 16, msg2); } while (u8g2.nextPage());
-  }
   DisableWifi();
-  WaitButtonPressed();
 }
+
+/**
+ * Convert an epoch time to UTC date and time.
+ *
+ * The function calculates the date numbers relative to a calendar that starts from
+ * 03/01/0000 for convenience of calculation. Once the numbers are obtained, they can be
+ * easily translated to calendar numbers.
+ *
+ * Some detailed ref to the algorithm: http://howardhinnant.github.io/date_algorithms.html
+ */
+static void EpochToUtc(uint32_t epoch, int *y, int *m, int *d, int *hh, int *mm, int *ss) {
+  const uint32_t kEpochToRef = 719468;
+  const uint32_t kSecsPerDay = 86400;
+  const uint32_t kSecsPerHour = 3600;
+  const uint32_t kSecsPerMinute = 60;
+  const uint32_t kDaysPerEra = 146097;
+  const uint32_t kDaysPerYear = 365;
+  const uint32_t kYearsPerEra = 400;
+  uint32_t days_from_epoch = epoch / kSecsPerDay;
+  /* shift the reference from epoch to 03/01/0000 */
+  uint32_t days_from_ref = days_from_epoch + kEpochToRef;
+  /* the era (400 yrs) number that the date is in; each era has 146097 days */
+  uint32_t era = days_from_ref / kDaysPerEra;
+  /* the day number within the era */
+  uint32_t doe = days_from_ref - era * kDaysPerEra;
+  /* the year number within the era */
+  uint32_t yoe = (doe
+             - doe / 1460 /* leap day every 4 yrs (1460 days) */
+             + doe / 36524 /* no leap day every 100 yrs (36524 days) */
+             - (doe == 146096 ? 1 : 0)) /* leap day every 400 yrs */
+            / kDaysPerYear;
+  /* the day number within the year; days start counting from Mar 1st */
+  uint32_t doy = doe - (yoe * kDaysPerYear + yoe / 4 - yoe / 100); 
+  /* month number from day number within the year; starts counting from Mar 1st */
+  uint32_t moy = (5 * doy + 2) / 153;
+  /* day number within the month */
+  uint32_t dom = doy - (153 * moy + 2) / 5;
+  /* calculate the calendar dates */
+  *d = dom + 1;
+  *m = moy > 9 ? moy - 9 : moy + 3;
+  *y = yoe + era * kYearsPerEra + (moy > 9 ? 1 : 0); /* moy 10 and 11 are Jan and Feb of
+                                                       the next calendar year */
+  /* calculate the time */
+  epoch -= (days_from_epoch * kSecsPerDay);
+  *hh = epoch / kSecsPerHour;
+  epoch -= (*hh * kSecsPerHour);
+  *mm = epoch / kSecsPerMinute;
+  epoch -= (*mm * kSecsPerMinute);
+  *ss = epoch;
+}
+
 
 bool SelectOption(char *opt) {
   for (int i = 0; i < 4; ++i) {
@@ -257,16 +345,25 @@ void RunFeeder() {
     u8g2.drawStr(0, 0, "Running Feeder 2 Min.");
     u8g2.drawStr(0, 16, "Press Button to terminate early");
   } while( u8g2.nextPage());
-  ActivateFeeder(10000);
+  ActivateFeeder(120000);
 }
 
 void ShowInformation() {
   WaitButtonReleased();
-  char buf[64];
-  sprintf(buf, "Millis: %lu\n", millis());
+  char l1[22];
+  char l2[22];
+  char l3[22];
+  int y, m, d, hh, mm, ss;
+  EpochToUtc(last_time_t, &y, &m, &d, &hh, &mm, &ss);
+  snprintf(l1, sizeof(l1), "Millis: %lu\n", millis());
+  snprintf(l2, sizeof(l2), "Date: %04d-%02d-%02d\n", y, m, d);
+  snprintf(l3, sizeof(l3), "Time: %02d:%02d:%02d\n", hh, mm, ss);
   u8g2.firstPage();
   do {
-    u8g2.drawStr(0, 0, buf);
+    u8g2.drawStr(0, 0, l1);
+    u8g2.drawStr(0, 16, l2);
+    u8g2.drawStr(0, 32, l3);
+    u8g2.drawStr(0, 48, "********-********");
   } while( u8g2.nextPage());
   WaitButtonPressed();
 }
@@ -280,9 +377,7 @@ void Interactive() {
 
   WaitButtonReleased();
   u8g2.setPowerSave(0);  /* OLED power on */
-  if (SelectOption("Get NTP time")) {
-    GetNtpTime();
-  } else if (SelectOption("Pump Manual Control")) {
+  if (SelectOption("Pump Manual Control")) {
     RunPump();
   } else if (SelectOption("Feeder Manual Control")) {
     RunFeeder();
@@ -293,10 +388,51 @@ void Interactive() {
   u8g2.setPowerSave(1);  /* OLED power off */
 }
 
+static void ExecuteJob() {
+  ActivateFeeder(15000);
+  long pump_off_ms, level_reached_ms = -1;
+  ActivatePump(&level_reached_ms, &pump_off_ms);
+}
+
+constexpr unsigned kInterval = 10 * 60; /* 10 minutes */
+
 void loop() {
-  if (ButtonPressed()) {
-    delay(150); /* debounce */
-    Interactive();
+  uint32_t current_millis = millis();
+  int32_t remaining = int32_t(wait_until - current_millis);
+  if (remaining > 0) {
+    if (ButtonPressed()) {
+      delay(150); /* debounce */
+      Interactive();
+    }
     return;
   }
+  UpdateTime();
+  if (!time_valid) {
+    wait_until = millis() + kInterval;
+    return;
+  }
+
+  uint32_t most_recent_job = 0;
+  if (pending_jobs.empty()) {
+    RepopulateJobs(GuessCurrentTime());
+  }
+  uint32_t now;
+  while (!pending_jobs.empty()) {
+    uint32_t next_job = *pending_jobs.begin();
+    now = GuessCurrentTime();
+    if (now < next_job) break;
+    most_recent_job = next_job;
+    pending_jobs.erase(pending_jobs.begin());
+    ExecuteJob();
+  }
+
+  if (most_recent_job) {
+    RepopulateJobs(most_recent_job);
+  }
+
+  now = GuessCurrentTime();
+  uint32_t next = now + kInterval;
+  uint32_t past = next % kInterval;
+  next -= past;
+  wait_until = millis() + (next - now) * 1000;
 }
