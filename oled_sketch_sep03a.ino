@@ -4,7 +4,93 @@
 
 #include <set>
 
-U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE);   // All Boards without Reset of the DispcdIcon  
+class U8g2 {
+ public:
+  U8g2() : u8g2_(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE) {
+    u8g2_.begin();
+    u8g2_.setFont(u8g2_font_6x10_tf);
+    u8g2_.setFontRefHeightExtendedText();
+    u8g2_.setDrawColor(1);
+    u8g2_.setFontPosTop();
+    u8g2_.setFontDirection(0);
+
+    Off();  /* OLED power off */
+    Reset();
+  }
+
+  void Reset() {
+    for (int i = 0; i < 4; ++i) {
+      lines_[i][0] = '\0';
+      lbuf_[i].line_ = lines_[i];
+      lbuf_[i].ofs_ = 0;
+    }
+    box_ = -1;
+  }
+
+  void Off() {
+    u8g2_.setPowerSave(1);  /* OLED power off */
+  }
+
+  void On() {
+    u8g2_.setPowerSave(0);  /* OLED power on */
+  }
+
+  class LineBuf {
+   public:
+    LineBuf &operator <<(int32_t var) {
+      if (ofs_ < 22) {
+        int len = snprintf(line_ + ofs_, 22 - ofs_, "%ld", var);
+        ofs_ += len;
+        if (ofs_ > 22) ofs_ = 22;
+      }
+      return *this;
+    }
+
+    LineBuf &operator <<(const char *ptr) {
+      for (;;) {
+        if (ofs_ >= 22) {
+          line_[21] = '\0';
+          break;
+        }
+        line_[ofs_] = *ptr;
+        if (*ptr == '\0')
+          break;
+        ++ptr; ++ofs_;
+      }
+      return *this;
+    }
+
+   private:
+    friend class U8g2;
+    char *line_;
+    int ofs_ = 0;
+  };
+
+  LineBuf &GetLineBuf(int i) { return lbuf_[i]; }
+
+  void SetBox(int box) { box_ = box; }
+
+  void Display() {
+    u8g2_.firstPage();
+    do {
+      for (int i = 0; i < 4; ++i) {
+        if (lines_[i][0] != '\0')
+          u8g2_.drawStr(0, 16 * i, lines_[i]);
+      }
+      if (box_ >= 0)
+        u8g2_.drawBox(box_ * 32, 10, 32, 6);
+    } while( u8g2_.nextPage());
+  }
+
+ private:
+  friend class LineBuf;
+  U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2_;
+  int box_ = -1;
+  LineBuf lbuf_[4];
+  char lines_[4][22];
+};
+
+static U8g2 *u8g2 = nullptr;
 
 struct JobTime {
   unsigned hour;
@@ -122,8 +208,7 @@ WiFiUDP udp;
 void setup() {
   DisableWifi();
   pinMode(D8, INPUT_PULLUP);
-  u8g2.begin();
-  u8g2.setPowerSave(1);  /* OLED power off */
+  u8g2 = new U8g2;
 }
 
 static bool inline ButtonPressed() {
@@ -267,11 +352,10 @@ static void EpochToUtc(uint32_t epoch, int *y, int *m, int *d, int *hh, int *mm,
 
 bool SelectOption(char *opt) {
   for (int i = 0; i < 4; ++i) {
-    u8g2.firstPage();
-    do {
-      u8g2.drawStr(0, 0, opt);
-      u8g2.drawBox(i*32,10,32,6);
-    } while( u8g2.nextPage());
+    u8g2->Reset();
+    u8g2->GetLineBuf(0) << opt;
+    u8g2->SetBox(i);
+    u8g2->Display();
     for (int j = 0; j < 5; ++j) {
       delay(100);
       if (ButtonPressed())
@@ -318,65 +402,45 @@ void ActivateFeeder(unsigned msec) {
 
 void RunPump() {
   WaitButtonReleased();
-  u8g2.firstPage();
-  do {
-    u8g2.drawStr(0, 0, "Running Pump until full");
-    u8g2.drawStr(0, 16, "Press Button to terminate early");
-  } while(u8g2.nextPage());
+  u8g2->Reset();
+  u8g2->GetLineBuf(0) << "Running Pump until full";
+  u8g2->GetLineBuf(1) << "Press Button to terminate";
+  u8g2->Display();
   long pump_off_ms, level_reached_ms = -1;
   ActivatePump(&level_reached_ms, &pump_off_ms);
-  u8g2.firstPage();
-  char msg1[32];
-  char msg2[32];
-  sprintf(msg1, "Level reached %ld", level_reached_ms);
-  sprintf(msg2, "Pump off %ld", pump_off_ms);
-  do {
-    u8g2.drawStr(0, 16, msg1);
-    u8g2.drawStr(0, 26, msg2);
-  } while(u8g2.nextPage());
+  u8g2->Reset();
+  u8g2->GetLineBuf(0) <<  "Level reached " << level_reached_ms;
+  u8g2->GetLineBuf(1) <<  "Pump off " <<  pump_off_ms;
+  u8g2->Display();
   WaitButtonReleased();
   WaitButtonPressed();
 }
 
 void RunFeeder() {
   WaitButtonReleased();
-  u8g2.firstPage();
-  do {
-    u8g2.drawStr(0, 0, "Running Feeder 2 Min.");
-    u8g2.drawStr(0, 16, "Press Button to terminate early");
-  } while( u8g2.nextPage());
+  u8g2->Reset();
+  u8g2->GetLineBuf(0) << "Running Feeder 2 Min.";
+  u8g2->GetLineBuf(1) << "Press Button to terminate";
+  u8g2->Display();
   ActivateFeeder(120000);
 }
 
 void ShowInformation() {
   WaitButtonReleased();
-  char l1[22];
-  char l2[22];
-  char l3[22];
   int y, m, d, hh, mm, ss;
   EpochToUtc(last_time_t, &y, &m, &d, &hh, &mm, &ss);
-  snprintf(l1, sizeof(l1), "Millis: %lu\n", millis());
-  snprintf(l2, sizeof(l2), "Date: %04d-%02d-%02d\n", y, m, d);
-  snprintf(l3, sizeof(l3), "Time: %02d:%02d:%02d\n", hh, mm, ss);
-  u8g2.firstPage();
-  do {
-    u8g2.drawStr(0, 0, l1);
-    u8g2.drawStr(0, 16, l2);
-    u8g2.drawStr(0, 32, l3);
-    u8g2.drawStr(0, 48, "********-********");
-  } while( u8g2.nextPage());
+  u8g2->Reset();
+  u8g2->GetLineBuf(0) << "Millis: " << uint32_t(millis());
+  u8g2->GetLineBuf(1) << "Date: " << y << "-" << m << "-" << d;
+  u8g2->GetLineBuf(2) << "Time: " << hh << ":" << mm << ":" << ss;
+  u8g2->GetLineBuf(3) <<  "********-********";
+  u8g2->Display();
   WaitButtonPressed();
 }
 
 void Interactive() {
-  u8g2.setFont(u8g2_font_6x10_tf);
-  u8g2.setFontRefHeightExtendedText();
-  u8g2.setDrawColor(1);
-  u8g2.setFontPosTop();
-  u8g2.setFontDirection(0);
-
   WaitButtonReleased();
-  u8g2.setPowerSave(0);  /* OLED power on */
+  u8g2->On(); /* OLED power on */
   if (SelectOption("Pump Manual Control")) {
     RunPump();
   } else if (SelectOption("Feeder Manual Control")) {
@@ -385,7 +449,7 @@ void Interactive() {
     ShowInformation();
   }
   WaitButtonReleased();
-  u8g2.setPowerSave(1);  /* OLED power off */
+  u8g2->Off();  /* OLED power off */
 }
 
 static void ExecuteJob() {
