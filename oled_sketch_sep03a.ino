@@ -1,8 +1,77 @@
 #include <U8g2lib.h>
+#include <ESP8266WiFi.h>
+#include <WiFiUdp.h>
 
 U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE);   // All Boards without Reset of the DispcdIcon  
 
+#ifndef STASSID
+#define STASSID "ssid"
+#define STAPSK  "pwd"
+#endif
+
+const char * ssid = STASSID; // your network SSID (name)
+const char * pass = STAPSK;  // your network password
+
+unsigned int localPort = 2390;      // local port to listen for UDP packets
+
+static bool wifi_enabled = false;
+
+static void DisableWifi() {
+  WiFi.mode( WIFI_OFF );
+  WiFi.forceSleepBegin();
+  delay( 1 );
+  wifi_enabled = false;
+}
+
+static void EnableWifi() {
+  WiFi.forceSleepWake();
+  delay(1);
+
+  /* Don't save connection info to flash */
+  WiFi.persistent( false );
+
+  // Bring up the WiFi connection
+  WiFi.mode( WIFI_STA );
+  WiFi.begin(ssid, pass);
+  for (int retries = 0;; ++retries) {
+    if (WiFi.status() == WL_CONNECTED) {
+      wifi_enabled = true;
+      return;
+    }
+    if (retries >= 300) {
+      DisableWifi();
+      return;
+    }
+    delay(50);
+  }
+}
+
+constexpr int time_zone = -7;
+uint32_t last_time_t = 0;
+uint32_t last_millis = 0;
+
+uint32_t wait_until = 0;
+bool time_valid = false;
+
+uint32_t GuessCurrentTime() {
+  uint32_t now = last_time_t;
+  now += (millis() - last_millis) / 1000;
+  return now;
+}
+
+
+IPAddress timeServerIP; // time.nist.gov NTP server address
+const char* ntpServerName = "10.0.0.14"; //"time.nist.gov";
+
+const int NTP_PACKET_SIZE = 48; // NTP time stamp is in the first 48 bytes of the message
+
+byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
+
+// A UDP instance to let us send and receive packets over UDP
+WiFiUDP udp;
+
 void setup() {
+  DisableWifi();
   pinMode(D8, INPUT_PULLUP);
   u8g2.begin();
   u8g2.setPowerSave(1);  /* OLED power off */
@@ -34,6 +103,78 @@ static void inline WaitButtonPressed() {
     }
     delay(50);
   }
+}
+
+// send an NTP request to the time server at the given address
+void sendNTPpacket(IPAddress& address) {
+  // set all bytes in the buffer to 0
+  memset(packetBuffer, 0, NTP_PACKET_SIZE);
+  // Initialize values needed to form NTP request
+  // (see URL above for details on the packets)
+  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
+  packetBuffer[1] = 0;     // Stratum, or type of clock
+  packetBuffer[2] = 6;     // Polling Interval
+  packetBuffer[3] = 0xEC;  // Peer Clock Precision
+  // 8 bytes of zero for Root Delay & Root Dispersion
+  packetBuffer[12]  = 49;
+  packetBuffer[13]  = 0x4E;
+  packetBuffer[14]  = 49;
+  packetBuffer[15]  = 52;
+
+  // all NTP fields have been given values, now
+  // you can send a packet requesting a timestamp:
+  udp.beginPacket(address, 123); //NTP requests are to port 123
+  udp.write(packetBuffer, NTP_PACKET_SIZE);
+  udp.endPacket();
+}
+
+void GetNtpTime() {
+  time_valid = false;
+  unsigned long duration = millis();
+  EnableWifi();
+  duration = millis() - duration;
+  char msg1[22];
+  char msg2[22];
+  snprintf(msg1, sizeof(msg1), "Wifi %s in %lu", wifi_enabled ? "OK" : "Fail", duration);
+  u8g2.firstPage(); do { u8g2.drawStr(0, 0, msg1); } while( u8g2.nextPage());
+  if (!wifi_enabled) return;
+  udp.begin(localPort);
+
+  int udp_len = 0;
+  WiFi.hostByName(ntpServerName, timeServerIP);
+  sendNTPpacket(timeServerIP);
+  uint32_t millis_now = millis();
+  for (int retries = 0;; ++retries) {
+    if (retries >= 40) break;
+    if (udp.parsePacket() == 0) {
+      delay(50);
+      continue;
+    }
+    udp_len = udp.read(packetBuffer, NTP_PACKET_SIZE); // read the packet into the buffer
+    break;
+  }
+  snprintf(msg2, sizeof(msg2), "udp_len: %d", udp_len);
+  u8g2.firstPage(); do { u8g2.drawStr(0, 0, msg1); u8g2.drawStr(0, 16, msg2); } while (u8g2.nextPage());
+
+  if (udp_len >= 44) {
+    unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
+    unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
+    unsigned long secsSince1900 = highWord << 16 | lowWord;
+
+    // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
+    const unsigned long seventyYears = 2208988800UL;
+    // subtract seventy years:
+    unsigned long epoch = secsSince1900 - seventyYears;
+    last_time_t = epoch + time_zone * 60 * 60;
+    last_millis = millis_now;
+    time_valid = true;
+  }
+  if (time_valid) {
+    snprintf(msg2, sizeof(msg2), "time_t: %lu", last_time_t);
+  u8g2.firstPage(); do { u8g2.drawStr(0, 0, msg1); u8g2.drawStr(0, 16, msg2); } while (u8g2.nextPage());
+  }
+  DisableWifi();
+  WaitButtonPressed();
 }
 
 bool SelectOption(char *opt) {
@@ -139,7 +280,9 @@ void Interactive() {
 
   WaitButtonReleased();
   u8g2.setPowerSave(0);  /* OLED power on */
-  if (SelectOption("Pump Manual Control")) {
+  if (SelectOption("Get NTP time")) {
+    GetNtpTime();
+  } else if (SelectOption("Pump Manual Control")) {
     RunPump();
   } else if (SelectOption("Feeder Manual Control")) {
     RunFeeder();
