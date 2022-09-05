@@ -4,6 +4,8 @@
 
 #include <set>
 
+constexpr int time_zone = -7;
+
 class U8g2 {
  public:
   U8g2() : u8g2_(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE) {
@@ -92,56 +94,178 @@ class U8g2 {
 
 static U8g2 *u8g2 = nullptr;
 
+class Connection {
+ public:
+  Connection() {
+    WiFi.forceSleepWake();
+    delay(1);
+
+    /* Don't save connection info to flash */
+    WiFi.persistent(false);
+
+    // Bring up the WiFi connection
+    WiFi.mode( WIFI_STA );
+    WiFi.begin("ssid", "pwd");
+
+    for (int retries = 0;; ++retries) {
+      if (WiFi.status() == WL_CONNECTED) {
+        enabled_ = true;
+        return;
+      }
+      if (retries >= 300) {
+        DisableWifi();
+        return;
+      }
+      delay(50);
+    }
+  }
+  ~Connection() {
+    if (enabled_)
+      DisableWifi();
+  }
+
+  static void DisableWifi() {
+    WiFi.mode( WIFI_OFF );
+    WiFi.forceSleepBegin();
+    delay( 1 );
+  }
+
+  void CallNtpServer() {
+    WiFiUDP udp;
+    udp.begin(kLocalPort);
+    IPAddress timeServerIP(10, 0, 0, 14);  /* local reference machine */
+
+    /* NTP time stamp is in the first 48 bytes of the message */
+    constexpr int kNtpPacketSize = 48;
+    uint8_t packetBuffer[kNtpPacketSize];
+
+    // set all bytes in the buffer to 0
+    memset(packetBuffer, 0, sizeof(packetBuffer));
+    // Initialize values needed to form NTP request
+    packetBuffer[0] = 0b11100011;   // LI, Version, Mode
+    packetBuffer[1] = 0;     // Stratum, or type of clock
+    packetBuffer[2] = 6;     // Polling Interval
+    packetBuffer[3] = 0xEC;  // Peer Clock Precision
+    // 8 bytes of zero for Root Delay & Root Dispersion
+    packetBuffer[12]  = 49;
+    packetBuffer[13]  = 0x4E;
+    packetBuffer[14]  = 49;
+    packetBuffer[15]  = 52;
+
+    /* all NTP fields have been given values. Send a packet requesting a timestamp  */
+    udp.beginPacket(timeServerIP, 123); //NTP requests are to port 123
+    udp.write(packetBuffer, sizeof(packetBuffer));
+    udp.endPacket();
+
+    int udp_len = 0;
+    uint32_t millis_now = millis();
+    for (int retries = 0;; ++retries) {
+      if (retries >= 40) break;
+      if (udp.parsePacket() == 0) {
+        delay(50);
+        continue;
+      }
+      udp_len = udp.read(packetBuffer, sizeof(packetBuffer)); // read the packet into the buffer
+      break;
+    }
+
+    if (udp_len >= 44) {
+      unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
+      unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
+      unsigned long secsSince1900 = highWord << 16 | lowWord;
+
+      // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
+      const unsigned long seventyYears = 2208988800UL;
+      // subtract seventy years:
+      unsigned long epoch = secsSince1900 - seventyYears;
+      ntp_time_ = epoch + time_zone * 60 * 60;
+      ntp_millis_ = millis_now;
+      ntp_valid_ = true;
+    }
+  }
+
+  bool GetNtpResult(uint32_t *millis, uint32_t *time) const {
+    if (!ntp_valid_) return false;
+    *millis = ntp_millis_;
+    *time = ntp_time_;
+    return true;
+  }
+
+  class Connection& operator<<(const char *ptr) {
+    if (report_ptr_ >= sizeof(report_)) return *this;
+    char *buf = (char *)report_;
+    int len = snprintf(buf + report_ptr_, sizeof(report_) - report_ptr_,
+      "%s", ptr);
+    report_ptr_ += len;
+    FlushIf();
+    return *this;
+  }
+
+  class Connection& operator<<(int32_t val) {
+    if (report_ptr_ >= sizeof(report_)) return *this;
+    char *buf = (char *)report_;
+    int len = snprintf(buf + report_ptr_, sizeof(report_) - report_ptr_,
+      "%d", val);
+    report_ptr_ += len;
+    FlushIf();
+    return *this;
+  }
+
+ private:
+  void FlushIf() {
+    if (report_ptr_ >= sizeof(report_)) {
+      Flush();
+      return;
+    }
+    if (report_ptr_ > 0 && report_[report_ptr_ - 1] == '\n') {
+      Flush();
+    }
+  }
+  void Flush() {
+    report_[sizeof(report_) - 1] = '\0';
+    report_[sizeof(report_) - 2] = '\n';
+    static int ofs = 0;
+    IPAddress receiver(10,0,0,14);
+    WiFiClient client;
+
+    int rc;
+    rc = client.connect(receiver, 9876);
+    if (!rc) {
+      report_ptr_ = 0;
+      return;
+    }
+    rc = client.write(report_, report_ptr_);
+    report_ptr_ = 0;
+    /* wait for server reply */
+    unsigned long timeout = millis();
+    while (client.available() == 0) {
+      if (millis() - timeout > 5000) {
+        client.stop();
+        break;
+      }
+    }
+  }
+
+  
+  /* open local port to listen for UDP packets */
+  constexpr static unsigned kLocalPort = 2390;
+  bool enabled_ = false;
+  bool ntp_valid_ = false;
+  uint32_t ntp_millis_;
+  uint32_t ntp_time_;
+  int report_ptr_ = 0;
+  byte report_[256];
+};
+
+static Connection *current_connection = nullptr;
+
 struct JobTime {
   unsigned hour;
   unsigned minute;
 };
 
-JobTime jobs[] = {{8, 40}, {13, 0}, {17, 30}};
+JobTime jobs[] = {{8, 40}, {12, 00}, {17, 30}};
 
-#ifndef STASSID
-#define STASSID "ssid"
-#define STAPSK  "pwd"
-#endif
-
-const char * ssid = STASSID; // your network SSID (name)
-const char * pass = STAPSK;  // your network password
-
-unsigned int localPort = 2390;      // local port to listen for UDP packets
-
-static bool wifi_enabled = false;
-
-static void DisableWifi() {
-  WiFi.mode( WIFI_OFF );
-  WiFi.forceSleepBegin();
-  delay( 1 );
-  wifi_enabled = false;
-}
-
-static void EnableWifi() {
-  WiFi.forceSleepWake();
-  delay(1);
-
-  /* Don't save connection info to flash */
-  WiFi.persistent( false );
-
-  // Bring up the WiFi connection
-  WiFi.mode( WIFI_STA );
-  WiFi.begin(ssid, pass);
-  for (int retries = 0;; ++retries) {
-    if (WiFi.status() == WL_CONNECTED) {
-      wifi_enabled = true;
-      return;
-    }
-    if (retries >= 300) {
-      DisableWifi();
-      return;
-    }
-    delay(50);
-  }
-}
-
-constexpr int time_zone = -7;
 uint32_t last_time_t = 0;
 uint32_t last_millis = 0;
 
@@ -155,23 +279,6 @@ uint32_t GuessCurrentTime() {
 }
 
 static std::set<uint32_t> pending_jobs;
-
-static char report[256];
-static int report_ptr = 0;
-
-void WriteReport(char *ptr) {
-  if (report_ptr >= sizeof(report)) return;
-  int len = snprintf(report + report_ptr, sizeof(report) - report_ptr,
-    "%s", ptr);
-  report_ptr += len;
-}
-
-void WriteReport(int32_t val) {
-  if (report_ptr >= sizeof(report)) return;
-  int len = snprintf(report + report_ptr, sizeof(report) - report_ptr,
-    "%d", val);
-  report_ptr += len;
-}
 
 void RepopulateJobs(uint32_t newer_than) {
   uint32_t now = GuessCurrentTime();
@@ -187,26 +294,18 @@ void RepopulateJobs(uint32_t newer_than) {
     if (next_job > newer_than)
       pending_jobs.insert(next_job);
   }
-  WriteReport("Jobs in");
-  for (uint32_t job : pending_jobs) {
-    WriteReport(" ");
-    WriteReport(int32_t(job - now));
+  if (current_connection) {
+    (*current_connection) << "Jobs in";
+    for (uint32_t job : pending_jobs) {
+      (*current_connection) << " ";
+      (*current_connection) << int32_t(job - now);
+    }
+    (*current_connection) << "\n";
   }
-  WriteReport("\n");
 }
 
-IPAddress timeServerIP; // time.nist.gov NTP server address
-const char* ntpServerName = "10.0.0.14"; //"time.nist.gov";
-
-const int NTP_PACKET_SIZE = 48; // NTP time stamp is in the first 48 bytes of the message
-
-byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
-
-// A UDP instance to let us send and receive packets over UDP
-WiFiUDP udp;
-
 void setup() {
-  DisableWifi();
+  Connection::DisableWifi();
   pinMode(D8, INPUT_PULLUP);
   u8g2 = new U8g2;
 }
@@ -237,66 +336,6 @@ static void inline WaitButtonPressed() {
     }
     delay(50);
   }
-}
-
-// send an NTP request to the time server at the given address
-void sendNTPpacket(IPAddress& address) {
-  // set all bytes in the buffer to 0
-  memset(packetBuffer, 0, NTP_PACKET_SIZE);
-  // Initialize values needed to form NTP request
-  // (see URL above for details on the packets)
-  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
-  packetBuffer[1] = 0;     // Stratum, or type of clock
-  packetBuffer[2] = 6;     // Polling Interval
-  packetBuffer[3] = 0xEC;  // Peer Clock Precision
-  // 8 bytes of zero for Root Delay & Root Dispersion
-  packetBuffer[12]  = 49;
-  packetBuffer[13]  = 0x4E;
-  packetBuffer[14]  = 49;
-  packetBuffer[15]  = 52;
-
-  // all NTP fields have been given values, now
-  // you can send a packet requesting a timestamp:
-  udp.beginPacket(address, 123); //NTP requests are to port 123
-  udp.write(packetBuffer, NTP_PACKET_SIZE);
-  udp.endPacket();
-}
-
-void UpdateTime() {
-  unsigned long duration = millis();
-  EnableWifi();
-  duration = millis() - duration;
-  if (!wifi_enabled) return;
-  udp.begin(localPort);
-
-  int udp_len = 0;
-  WiFi.hostByName(ntpServerName, timeServerIP);
-  sendNTPpacket(timeServerIP);
-  uint32_t millis_now = millis();
-  for (int retries = 0;; ++retries) {
-    if (retries >= 40) break;
-    if (udp.parsePacket() == 0) {
-      delay(50);
-      continue;
-    }
-    udp_len = udp.read(packetBuffer, NTP_PACKET_SIZE); // read the packet into the buffer
-    break;
-  }
-
-  if (udp_len >= 44) {
-    unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
-    unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
-    unsigned long secsSince1900 = highWord << 16 | lowWord;
-
-    // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
-    const unsigned long seventyYears = 2208988800UL;
-    // subtract seventy years:
-    unsigned long epoch = secsSince1900 - seventyYears;
-    last_time_t = epoch + time_zone * 60 * 60;
-    last_millis = millis_now;
-    time_valid = true;
-  }
-  DisableWifi();
 }
 
 /**
@@ -348,7 +387,6 @@ static void EpochToUtc(uint32_t epoch, int *y, int *m, int *d, int *hh, int *mm,
   epoch -= (*mm * kSecsPerMinute);
   *ss = epoch;
 }
-
 
 bool SelectOption(char *opt) {
   for (int i = 0; i < 4; ++i) {
@@ -470,9 +508,15 @@ void loop() {
     }
     return;
   }
-  UpdateTime();
+  Connection connection;
+  current_connection = &connection;
+  connection << "Wakeup\n";
+  connection.CallNtpServer();
+  if (connection.GetNtpResult(&last_millis, &last_time_t))
+    time_valid = true;
   if (!time_valid) {
     wait_until = millis() + kInterval;
+    current_connection = nullptr;
     return;
   }
 
@@ -499,4 +543,5 @@ void loop() {
   uint32_t past = next % kInterval;
   next -= past;
   wait_until = millis() + (next - now) * 1000;
+  current_connection = nullptr;
 }
