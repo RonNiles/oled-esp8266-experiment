@@ -6,6 +6,9 @@
 
 constexpr int time_zone = -7;
 
+/**
+ * U8g2: Implements 4 lines of text and a progress box on top of the U8g2 interface
+ */
 class U8g2 {
  public:
   U8g2() : u8g2_(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE) {
@@ -94,6 +97,12 @@ class U8g2 {
 
 static U8g2 *u8g2 = nullptr;
 
+/**
+ * Connection class
+ *   - turns Wifi on and off as needed
+ *   - Does NTP to determine the UTC time
+ *   - Implements a report log which flushes to external listener via TCP
+ */
 class Connection {
  public:
   Connection() {
@@ -259,15 +268,226 @@ class Connection {
 
 static Connection *current_connection = nullptr;
 
+/**
+ * JobInputOutput
+ * Manages the pins for I/O
+ */
+class JobInputOutput {
+ public:
+  static void Setup() {
+   pinMode(D8, INPUT_PULLUP);
+  }
+
+  static void ActivatePump(long *level_reached_msec, long *pump_off_msec) {
+    pinMode(D5, INPUT);
+
+    uint32_t start_millis = millis();
+    uint32_t end_millis = start_millis + 50 * 1000;
+    digitalWrite(D7, LOW);
+    pinMode(D7, OUTPUT);
+    while (int32_t(millis() - end_millis) < 0) {
+      delay(10);
+      if (ButtonPressed())
+        break;
+      if (digitalRead(D5) == HIGH) {
+        if (level_reached_msec)
+          *level_reached_msec = long(millis() - start_millis);
+        break;
+      }
+    }
+    pinMode(D7, INPUT);
+    if (pump_off_msec)
+      *pump_off_msec = long(millis() - start_millis);
+  }
+
+  static void ActivateFeeder(unsigned msec) {
+    digitalWrite(D6, LOW);
+    pinMode(D6, OUTPUT);
+    unsigned long start = millis();
+    do {
+      delay(100);
+      if (ButtonPressed())
+        break;
+    } while (millis() - start < msec);
+    pinMode(D6, INPUT);
+    delay(1000);
+  }
+
+  static void ExecuteJob() {
+    ActivateFeeder(15000);
+    long pump_off_ms, level_reached_ms = -1;
+    ActivatePump(&level_reached_ms, &pump_off_ms);
+    if (current_connection) {
+      (*current_connection) <<  "Level reached " << level_reached_ms;
+      (*current_connection) <<  ", Pump off " <<  pump_off_ms << "\n";
+    }
+  }
+
+  static bool ButtonPressed() {
+   return digitalRead(D8) == HIGH;
+  }
+
+  static void inline WaitButtonReleased() {
+    int countdown = 0;
+    for (;;) {
+      if (ButtonPressed()) {
+        countdown = 0;
+      } else if (++countdown > 4) {
+        break;
+      }
+      delay(50);
+    }
+  }
+
+  static void inline WaitButtonPressed() {
+    int countdown = 0;
+    for (;;) {
+      if (!ButtonPressed()) {
+        countdown = 0;
+      } else if (++countdown > 4) {
+        break;
+      }
+      delay(50);
+    }
+  }
+};
+
+uint32_t last_time_t = 0;
+uint32_t last_millis = 0;
+
+class Interactive : public JobInputOutput{
+ public:
+  static void Check() {
+    if (ButtonPressed()) {
+      delay(150); /* debounce */
+      RunInteractive();
+    }
+  }
+ private:
+  static void RunInteractive() {
+    WaitButtonReleased();
+    u8g2->On(); /* OLED power on */
+    if (SelectOption("Pump Manual Control")) {
+      RunPump();
+    } else if (SelectOption("Feeder Manual Control")) {
+      RunFeeder();
+    } else if (SelectOption("Show Information")) {
+      ShowInformation();
+    }
+    WaitButtonReleased();
+    u8g2->Off();  /* OLED power off */
+  }
+
+  static bool SelectOption(char *opt) {
+    for (int i = 0; i < 4; ++i) {
+      u8g2->Reset();
+      u8g2->GetLineBuf(0) << opt;
+      u8g2->SetBox(i);
+      u8g2->Display();
+      for (int j = 0; j < 5; ++j) {
+        delay(100);
+        if (ButtonPressed())
+          return true;
+      }
+    }
+    return false;
+  }
+
+  static void RunPump() {
+    WaitButtonReleased();
+    u8g2->Reset();
+    u8g2->GetLineBuf(0) << "Running Pump until full";
+    u8g2->GetLineBuf(1) << "Press Button to terminate";
+    u8g2->Display();
+    long pump_off_ms, level_reached_ms = -1;
+    ActivatePump(&level_reached_ms, &pump_off_ms);
+    u8g2->Reset();
+    u8g2->GetLineBuf(0) <<  "Level reached " << level_reached_ms;
+    u8g2->GetLineBuf(1) <<  "Pump off " <<  pump_off_ms;
+    u8g2->Display();
+    WaitButtonReleased();
+    WaitButtonPressed();
+  }
+
+  static void RunFeeder() {
+    WaitButtonReleased();
+    u8g2->Reset();
+    u8g2->GetLineBuf(0) << "Running Feeder 2 Min.";
+    u8g2->GetLineBuf(1) << "Press Button to terminate";
+    u8g2->Display();
+    ActivateFeeder(120000);
+  }
+
+  static void ShowInformation() {
+    WaitButtonReleased();
+    int y, m, d, hh, mm, ss;
+    EpochToUtc(last_time_t, &y, &m, &d, &hh, &mm, &ss);
+    u8g2->Reset();
+    u8g2->GetLineBuf(0) << "Millis: " << uint32_t(millis());
+    u8g2->GetLineBuf(1) << "Date: " << y << "-" << m << "-" << d;
+    u8g2->GetLineBuf(2) << "Time: " << hh << ":" << mm << ":" << ss;
+    u8g2->GetLineBuf(3) <<  "********-********";
+    u8g2->Display();
+    WaitButtonPressed();
+  }
+
+  /**
+   * Convert an epoch time to UTC date and time.
+   *
+   * The function calculates the date numbers relative to a calendar that starts from
+   * 03/01/0000 for convenience of calculation. Once the numbers are obtained, they can be
+   * easily translated to calendar numbers.
+   *
+   * Some detailed ref to the algorithm: http://howardhinnant.github.io/date_algorithms.html
+   */
+  static void EpochToUtc(uint32_t epoch, int *y, int *m, int *d, int *hh, int *mm, int *ss) {
+    const uint32_t kEpochToRef = 719468;
+    const uint32_t kSecsPerDay = 86400;
+    const uint32_t kSecsPerHour = 3600;
+    const uint32_t kSecsPerMinute = 60;
+    const uint32_t kDaysPerEra = 146097;
+    const uint32_t kDaysPerYear = 365;
+    const uint32_t kYearsPerEra = 400;
+    uint32_t days_from_epoch = epoch / kSecsPerDay;
+    /* shift the reference from epoch to 03/01/0000 */
+    uint32_t days_from_ref = days_from_epoch + kEpochToRef;
+    /* the era (400 yrs) number that the date is in; each era has 146097 days */
+    uint32_t era = days_from_ref / kDaysPerEra;
+    /* the day number within the era */
+    uint32_t doe = days_from_ref - era * kDaysPerEra;
+    /* the year number within the era */
+    uint32_t yoe = (doe
+               - doe / 1460 /* leap day every 4 yrs (1460 days) */
+               + doe / 36524 /* no leap day every 100 yrs (36524 days) */
+               - (doe == 146096 ? 1 : 0)) /* leap day every 400 yrs */
+              / kDaysPerYear;
+    /* the day number within the year; days start counting from Mar 1st */
+    uint32_t doy = doe - (yoe * kDaysPerYear + yoe / 4 - yoe / 100);
+    /* month number from day number within the year; starts counting from Mar 1st */
+    uint32_t moy = (5 * doy + 2) / 153;
+    /* day number within the month */
+    uint32_t dom = doy - (153 * moy + 2) / 5;
+    /* calculate the calendar dates */
+    *d = dom + 1;
+    *m = moy > 9 ? moy - 9 : moy + 3;
+    *y = yoe + era * kYearsPerEra + (moy > 9 ? 1 : 0); /* moy 10 and 11 are Jan and Feb of
+                                                         the next calendar year */
+    /* calculate the time */
+    epoch -= (days_from_epoch * kSecsPerDay);
+    *hh = epoch / kSecsPerHour;
+    epoch -= (*hh * kSecsPerHour);
+    *mm = epoch / kSecsPerMinute;
+    epoch -= (*mm * kSecsPerMinute);
+    *ss = epoch;
+  }
+};
+
 struct JobTime {
   unsigned hour;
   unsigned minute;
 };
 
-JobTime jobs[] = {{8, 40}, {12, 00}, {17, 30}};
-
-uint32_t last_time_t = 0;
-uint32_t last_millis = 0;
+JobTime jobs[] = {{8, 40}, {13, 00}, {17, 30}};
 
 uint32_t wait_until = 0;
 bool time_valid = false;
@@ -306,194 +526,8 @@ void RepopulateJobs(uint32_t newer_than) {
 
 void setup() {
   Connection::DisableWifi();
-  pinMode(D8, INPUT_PULLUP);
+  JobInputOutput::Setup();
   u8g2 = new U8g2;
-}
-
-static bool inline ButtonPressed() {
- return digitalRead(D8) == HIGH;
-}
-
-static void inline WaitButtonReleased() {
-  int countdown = 0;
-  for (;;) {
-    if (ButtonPressed()) {
-      countdown = 0;
-    } else if (++countdown > 4) {
-      break;
-    }
-    delay(50);
-  }
-}
-
-static void inline WaitButtonPressed() {
-  int countdown = 0;
-  for (;;) {
-    if (!ButtonPressed()) {
-      countdown = 0;
-    } else if (++countdown > 4) {
-      break;
-    }
-    delay(50);
-  }
-}
-
-/**
- * Convert an epoch time to UTC date and time.
- *
- * The function calculates the date numbers relative to a calendar that starts from
- * 03/01/0000 for convenience of calculation. Once the numbers are obtained, they can be
- * easily translated to calendar numbers.
- *
- * Some detailed ref to the algorithm: http://howardhinnant.github.io/date_algorithms.html
- */
-static void EpochToUtc(uint32_t epoch, int *y, int *m, int *d, int *hh, int *mm, int *ss) {
-  const uint32_t kEpochToRef = 719468;
-  const uint32_t kSecsPerDay = 86400;
-  const uint32_t kSecsPerHour = 3600;
-  const uint32_t kSecsPerMinute = 60;
-  const uint32_t kDaysPerEra = 146097;
-  const uint32_t kDaysPerYear = 365;
-  const uint32_t kYearsPerEra = 400;
-  uint32_t days_from_epoch = epoch / kSecsPerDay;
-  /* shift the reference from epoch to 03/01/0000 */
-  uint32_t days_from_ref = days_from_epoch + kEpochToRef;
-  /* the era (400 yrs) number that the date is in; each era has 146097 days */
-  uint32_t era = days_from_ref / kDaysPerEra;
-  /* the day number within the era */
-  uint32_t doe = days_from_ref - era * kDaysPerEra;
-  /* the year number within the era */
-  uint32_t yoe = (doe
-             - doe / 1460 /* leap day every 4 yrs (1460 days) */
-             + doe / 36524 /* no leap day every 100 yrs (36524 days) */
-             - (doe == 146096 ? 1 : 0)) /* leap day every 400 yrs */
-            / kDaysPerYear;
-  /* the day number within the year; days start counting from Mar 1st */
-  uint32_t doy = doe - (yoe * kDaysPerYear + yoe / 4 - yoe / 100); 
-  /* month number from day number within the year; starts counting from Mar 1st */
-  uint32_t moy = (5 * doy + 2) / 153;
-  /* day number within the month */
-  uint32_t dom = doy - (153 * moy + 2) / 5;
-  /* calculate the calendar dates */
-  *d = dom + 1;
-  *m = moy > 9 ? moy - 9 : moy + 3;
-  *y = yoe + era * kYearsPerEra + (moy > 9 ? 1 : 0); /* moy 10 and 11 are Jan and Feb of
-                                                       the next calendar year */
-  /* calculate the time */
-  epoch -= (days_from_epoch * kSecsPerDay);
-  *hh = epoch / kSecsPerHour;
-  epoch -= (*hh * kSecsPerHour);
-  *mm = epoch / kSecsPerMinute;
-  epoch -= (*mm * kSecsPerMinute);
-  *ss = epoch;
-}
-
-bool SelectOption(char *opt) {
-  for (int i = 0; i < 4; ++i) {
-    u8g2->Reset();
-    u8g2->GetLineBuf(0) << opt;
-    u8g2->SetBox(i);
-    u8g2->Display();
-    for (int j = 0; j < 5; ++j) {
-      delay(100);
-      if (ButtonPressed())
-        return true;
-    }
-  }
-  return false;
-}
-
-void ActivatePump(long *level_reached_msec, long *pump_off_msec) {
-  pinMode(D5, INPUT);
-
-  uint32_t start_millis = millis();
-  uint32_t end_millis = start_millis + 50 * 1000;
-  digitalWrite(D7, LOW);
-  pinMode(D7, OUTPUT);
-  while (int32_t(millis() - end_millis) < 0) {
-    delay(10);
-    if (ButtonPressed())
-      break;
-    if (digitalRead(D5) == HIGH) {
-      if (level_reached_msec)
-        *level_reached_msec = long(millis() - start_millis);
-      break;
-    }
-  }
-  pinMode(D7, INPUT);
-  if (pump_off_msec)
-    *pump_off_msec = long(millis() - start_millis);
-}
-
-void ActivateFeeder(unsigned msec) {
-  digitalWrite(D6, LOW);
-  pinMode(D6, OUTPUT);
-  unsigned long start = millis();
-  do {
-    delay(100);
-    if (ButtonPressed())
-      break;
-  } while (millis() - start < msec);
-  pinMode(D6, INPUT);
-  delay(1000);
-}
-
-void RunPump() {
-  WaitButtonReleased();
-  u8g2->Reset();
-  u8g2->GetLineBuf(0) << "Running Pump until full";
-  u8g2->GetLineBuf(1) << "Press Button to terminate";
-  u8g2->Display();
-  long pump_off_ms, level_reached_ms = -1;
-  ActivatePump(&level_reached_ms, &pump_off_ms);
-  u8g2->Reset();
-  u8g2->GetLineBuf(0) <<  "Level reached " << level_reached_ms;
-  u8g2->GetLineBuf(1) <<  "Pump off " <<  pump_off_ms;
-  u8g2->Display();
-  WaitButtonReleased();
-  WaitButtonPressed();
-}
-
-void RunFeeder() {
-  WaitButtonReleased();
-  u8g2->Reset();
-  u8g2->GetLineBuf(0) << "Running Feeder 2 Min.";
-  u8g2->GetLineBuf(1) << "Press Button to terminate";
-  u8g2->Display();
-  ActivateFeeder(120000);
-}
-
-void ShowInformation() {
-  WaitButtonReleased();
-  int y, m, d, hh, mm, ss;
-  EpochToUtc(last_time_t, &y, &m, &d, &hh, &mm, &ss);
-  u8g2->Reset();
-  u8g2->GetLineBuf(0) << "Millis: " << uint32_t(millis());
-  u8g2->GetLineBuf(1) << "Date: " << y << "-" << m << "-" << d;
-  u8g2->GetLineBuf(2) << "Time: " << hh << ":" << mm << ":" << ss;
-  u8g2->GetLineBuf(3) <<  "********-********";
-  u8g2->Display();
-  WaitButtonPressed();
-}
-
-void Interactive() {
-  WaitButtonReleased();
-  u8g2->On(); /* OLED power on */
-  if (SelectOption("Pump Manual Control")) {
-    RunPump();
-  } else if (SelectOption("Feeder Manual Control")) {
-    RunFeeder();
-  } else if (SelectOption("Show Information")) {
-    ShowInformation();
-  }
-  WaitButtonReleased();
-  u8g2->Off();  /* OLED power off */
-}
-
-static void ExecuteJob() {
-  ActivateFeeder(15000);
-  long pump_off_ms, level_reached_ms = -1;
-  ActivatePump(&level_reached_ms, &pump_off_ms);
 }
 
 constexpr unsigned kInterval = 10 * 60; /* 10 minutes */
@@ -502,15 +536,12 @@ void loop() {
   uint32_t current_millis = millis();
   int32_t remaining = int32_t(wait_until - current_millis);
   if (remaining > 0) {
-    if (ButtonPressed()) {
-      delay(150); /* debounce */
-      Interactive();
-    }
+    Interactive::Check();
     return;
   }
   Connection connection;
   current_connection = &connection;
-  connection << "Wakeup\n";
+  connection << "Wakeup " << millis() << "\n";
   connection.CallNtpServer();
   if (connection.GetNtpResult(&last_millis, &last_time_t))
     time_valid = true;
@@ -531,7 +562,7 @@ void loop() {
     if (now < next_job) break;
     most_recent_job = next_job;
     pending_jobs.erase(pending_jobs.begin());
-    ExecuteJob();
+    JobInputOutput::ExecuteJob();
   }
 
   if (most_recent_job) {
