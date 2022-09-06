@@ -572,89 +572,100 @@ class TimeManager {
   EmaStat emastat;
 } tmgr;
 
-struct JobTime {
-  unsigned hour;
-  unsigned minute;
+/***************************************************************************************
+ * JobManager: Keep track of the job schedule and execute when needed
+ ***************************************************************************************/
+class JobManager {
+ public:
+  bool RunJobs() {
+    uint32_t current_millis = millis();
+    int32_t remaining = int32_t(wait_until_ - current_millis);
+    if (remaining > 0)
+      return false;
+    Connection connection;
+    current_connection = &connection;
+    connection << "Wakeup " << millis() << "\n";
+    connection.CallNtpServer();
+    tmgr.Update();
+    if (!tmgr.ValidTime()) {
+      wait_until_ = millis() + kInterval * 1000;
+      current_connection = nullptr;
+      return false;
+    }
+
+    uint32_t most_recent_job = 0;
+    if (pending_jobs_.empty()) {
+      RepopulateJobs(tmgr.GuessCurrentTime());
+    }
+    uint32_t now;
+    while (!pending_jobs_.empty()) {
+      uint32_t next_job = *pending_jobs_.begin();
+      now = tmgr.GuessCurrentTime();
+      if (now < next_job)
+        break;
+      most_recent_job = next_job;
+      pending_jobs_.erase(pending_jobs_.begin());
+      JobInputOutput::ExecuteJob();
+    }
+
+    if (most_recent_job) {
+      RepopulateJobs(most_recent_job);
+    }
+
+    now = tmgr.GuessCurrentTime();
+    uint32_t next = now + kInterval;
+    uint32_t past = next % kInterval;
+    next -= past;
+    wait_until_ = millis() + (next - now) * 1000;
+    current_connection = nullptr;
+    return true;
+  }
+
+ private:
+  struct JobTime {
+    unsigned hour;
+    unsigned minute;
+  };
+  void RepopulateJobs(uint32_t newer_than) {
+    uint32_t now = tmgr.GuessCurrentTime();
+    uint32_t past = now % 86400;
+    uint32_t last_day = now - past;
+    for (const JobTime &job : jobs_) {
+      uint32_t next_job = last_day;
+      next_job += uint32_t(job.minute) * 60;
+      next_job += uint32_t(job.hour) * 60 * 60;
+      if (next_job > newer_than)
+        pending_jobs_.insert(next_job);
+      next_job += 86400;
+      if (next_job > newer_than)
+        pending_jobs_.insert(next_job);
+    }
+    if (current_connection) {
+      (*current_connection) << "Jobs in";
+      for (uint32_t job : pending_jobs_) {
+        (*current_connection) << " ";
+        (*current_connection) << int32_t(job - now);
+      }
+      (*current_connection) << "\n";
+    }
+  }
+
+  constexpr static unsigned kInterval = 10 * 60; /* 10 minutes */
+  constexpr static JobTime jobs_[] = {{8, 40}, {13, 00}, {17, 30}};
+  uint32_t wait_until_ = 0;
+  std::set<uint32_t> pending_jobs_;
 };
 
-JobTime jobs[] = {{8, 40}, {13, 00}, {17, 30}};
-
-uint32_t wait_until = 0;
-
-static std::set<uint32_t> pending_jobs;
-
-void RepopulateJobs(uint32_t newer_than) {
-  uint32_t now = tmgr.GuessCurrentTime();
-  uint32_t past = now % 86400;
-  uint32_t last_day = now - past;
-  for (const JobTime &job : jobs) {
-    uint32_t next_job = last_day;
-    next_job += uint32_t(job.minute) * 60;
-    next_job += uint32_t(job.hour) * 60 * 60;
-    if (next_job > newer_than)
-      pending_jobs.insert(next_job);
-    next_job += 86400;
-    if (next_job > newer_than)
-      pending_jobs.insert(next_job);
-  }
-  if (current_connection) {
-    (*current_connection) << "Jobs in";
-    for (uint32_t job : pending_jobs) {
-      (*current_connection) << " ";
-      (*current_connection) << int32_t(job - now);
-    }
-    (*current_connection) << "\n";
-  }
-}
+static JobManager *job_manager;
 
 void setup() {
   Connection::DisableWifi();
   JobInputOutput::Setup();
   u8g2 = new U8g2;
+  job_manager = new JobManager;
 }
 
-constexpr unsigned kInterval = 10 * 60; /* 10 minutes */
-
 void loop() {
-  uint32_t current_millis = millis();
-  int32_t remaining = int32_t(wait_until - current_millis);
-  if (remaining > 0) {
+  if (!job_manager->RunJobs())
     Interactive::Check();
-    return;
-  }
-  Connection connection;
-  current_connection = &connection;
-  connection << "Wakeup " << millis() << "\n";
-  connection.CallNtpServer();
-  tmgr.Update();
-  if (!tmgr.ValidTime()) {
-    wait_until = millis() + kInterval * 1000;
-    current_connection = nullptr;
-    return;
-  }
-
-  uint32_t most_recent_job = 0;
-  if (pending_jobs.empty()) {
-    RepopulateJobs(tmgr.GuessCurrentTime());
-  }
-  uint32_t now;
-  while (!pending_jobs.empty()) {
-    uint32_t next_job = *pending_jobs.begin();
-    now = tmgr.GuessCurrentTime();
-    if (now < next_job) break;
-    most_recent_job = next_job;
-    pending_jobs.erase(pending_jobs.begin());
-    JobInputOutput::ExecuteJob();
-  }
-
-  if (most_recent_job) {
-    RepopulateJobs(most_recent_job);
-  }
-
-  now = tmgr.GuessCurrentTime();
-  uint32_t next = now + kInterval;
-  uint32_t past = next % kInterval;
-  next -= past;
-  wait_until = millis() + (next - now) * 1000;
-  current_connection = nullptr;
 }
