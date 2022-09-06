@@ -351,9 +351,6 @@ class JobInputOutput {
   }
 };
 
-uint32_t last_time_t = 0;
-uint32_t last_millis = 0;
-
 /***************************************************************************************
  * Interactive: for button presses and screen displays
  ***************************************************************************************/
@@ -423,11 +420,11 @@ class Interactive : public JobInputOutput{
   static void ShowInformation() {
     WaitButtonReleased();
     int y, m, d, hh, mm, ss;
-    EpochToUtc(last_time_t, &y, &m, &d, &hh, &mm, &ss);
+//    EpochToUtc(last_time_t, &y, &m, &d, &hh, &mm, &ss);
     u8g2->Reset();
     u8g2->GetLineBuf(0) << "Millis: " << uint32_t(millis());
-    u8g2->GetLineBuf(1) << "Date: " << y << "-" << m << "-" << d;
-    u8g2->GetLineBuf(2) << "Time: " << hh << ":" << mm << ":" << ss;
+//    u8g2->GetLineBuf(1) << "Date: " << y << "-" << m << "-" << d;
+//    u8g2->GetLineBuf(2) << "Time: " << hh << ":" << mm << ":" << ss;
     u8g2->GetLineBuf(3) <<  "********-********";
     u8g2->Display();
     WaitButtonPressed();
@@ -515,6 +512,17 @@ struct EmaStat {
 
 class TimeManager {
  public:
+  void Update() {
+    if (!current_connection) return;
+    uint32_t m, t;
+    if (current_connection->GetNtpResult(&m, &t)) {
+      AddSample(m, t);
+    }
+  }
+
+  bool ValidTime() const { return prev_time_t_ != 0; }
+
+  /* TODO: EMA should use samples one day or more apart to get accurate PPM from one second resolution */
   void AddSample(uint32_t sample_millis, uint32_t sample_time_t) {
     if (prev_time_t_) {
       uint32_t diff_time_t = sample_time_t - prev_time_t_;
@@ -535,6 +543,14 @@ class TimeManager {
     prev_millis_ = sample_millis;
     prev_time_t_ = sample_time_t;
   }
+
+  /* TODO use EMA, track millis() rollover */
+  uint32_t GuessCurrentTime() {
+    uint32_t now = prev_time_t_;
+    now += (millis() - prev_millis_) / 1000;
+    return now;
+  }
+
  private:
   uint32_t prev_millis_ = 0;
   uint32_t prev_time_t_ = 0;
@@ -549,18 +565,11 @@ struct JobTime {
 JobTime jobs[] = {{8, 40}, {13, 00}, {17, 30}};
 
 uint32_t wait_until = 0;
-bool time_valid = false;
-
-uint32_t GuessCurrentTime() {
-  uint32_t now = last_time_t;
-  now += (millis() - last_millis) / 1000;
-  return now;
-}
 
 static std::set<uint32_t> pending_jobs;
 
 void RepopulateJobs(uint32_t newer_than) {
-  uint32_t now = GuessCurrentTime();
+  uint32_t now = tmgr.GuessCurrentTime();
   uint32_t past = now % 86400;
   uint32_t last_day = now - past;
   for (const JobTime &job : jobs) {
@@ -602,24 +611,21 @@ void loop() {
   current_connection = &connection;
   connection << "Wakeup " << millis() << "\n";
   connection.CallNtpServer();
-  if (connection.GetNtpResult(&last_millis, &last_time_t)) {
-    tmgr.AddSample(last_millis, last_time_t);
-    time_valid = true;
-  }
-  if (!time_valid) {
-    wait_until = millis() + kInterval;
+  tmgr.Update();
+  if (!tmgr.ValidTime()) {
+    wait_until = millis() + kInterval * 1000;
     current_connection = nullptr;
     return;
   }
 
   uint32_t most_recent_job = 0;
   if (pending_jobs.empty()) {
-    RepopulateJobs(GuessCurrentTime());
+    RepopulateJobs(tmgr.GuessCurrentTime());
   }
   uint32_t now;
   while (!pending_jobs.empty()) {
     uint32_t next_job = *pending_jobs.begin();
-    now = GuessCurrentTime();
+    now = tmgr.GuessCurrentTime();
     if (now < next_job) break;
     most_recent_job = next_job;
     pending_jobs.erase(pending_jobs.begin());
@@ -630,7 +636,7 @@ void loop() {
     RepopulateJobs(most_recent_job);
   }
 
-  now = GuessCurrentTime();
+  now = tmgr.GuessCurrentTime();
   uint32_t next = now + kInterval;
   uint32_t past = next % kInterval;
   next -= past;
