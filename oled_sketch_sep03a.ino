@@ -6,9 +6,9 @@
 
 constexpr int time_zone = -7;
 
-/**
+/***************************************************************************************
  * U8g2: Implements 4 lines of text and a progress box on top of the U8g2 interface
- */
+ ***************************************************************************************/
 class U8g2 {
  public:
   U8g2() : u8g2_(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE) {
@@ -97,12 +97,12 @@ class U8g2 {
 
 static U8g2 *u8g2 = nullptr;
 
-/**
+/***************************************************************************************
  * Connection class
  *   - turns Wifi on and off as needed
  *   - Does NTP to determine the UTC time
  *   - Implements a report log which flushes to external listener via TCP
- */
+ ***************************************************************************************/
 class Connection {
  public:
   Connection() {
@@ -255,7 +255,6 @@ class Connection {
     }
   }
 
-  
   /* open local port to listen for UDP packets */
   constexpr static unsigned kLocalPort = 2390;
   bool enabled_ = false;
@@ -268,10 +267,10 @@ class Connection {
 
 static Connection *current_connection = nullptr;
 
-/**
+/***************************************************************************************
  * JobInputOutput
  * Manages the pins for I/O
- */
+ ***************************************************************************************/
 class JobInputOutput {
  public:
   static void Setup() {
@@ -355,6 +354,9 @@ class JobInputOutput {
 uint32_t last_time_t = 0;
 uint32_t last_millis = 0;
 
+/***************************************************************************************
+ * Interactive: for button presses and screen displays
+ ***************************************************************************************/
 class Interactive : public JobInputOutput{
  public:
   static void Check() {
@@ -482,6 +484,63 @@ class Interactive : public JobInputOutput{
   }
 };
 
+#define precision  8
+#define log_alpha  6
+
+struct EmaStat {
+  int32_t ema = 0;
+  uint32_t var = 0;
+  int count = 0;
+  int shift = -1;
+
+  void Next(int64_t sample) {
+    sample *= precision;
+    /* each power of two, double EMA period, until max */
+    if (shift < log_alpha) {
+      ++count;
+      if ((count & (count - 1)) == 0) {
+        ema *= 2;
+        var *= 2;
+        ++shift;
+      }
+    }
+    int32_t diff = (sample << shift) - ema;
+    ema += (diff >> shift);
+    var += diff * diff >> (shift * 2);
+    var -= (var >> shift);
+  }
+  int32_t GetEma() { return (ema >> shift) / precision; }
+  uint32_t GetVar() { return (var >> shift) / precision / precision; }
+};
+
+class TimeManager {
+ public:
+  void AddSample(uint32_t sample_millis, uint32_t sample_time_t) {
+    if (prev_time_t_) {
+      uint32_t diff_time_t = sample_time_t - prev_time_t_;
+      uint32_t diff_millis = sample_millis - prev_millis_;
+      if (diff_time_t >= 50 && diff_time_t <= 5000) {
+        /* scale the millis to 1000 seconds for PPM */
+        if (current_connection)
+          (*current_connection) << "dtt: " << diff_time_t << " dmil: " << diff_millis << "\n";
+        diff_millis *= 1000;
+        diff_millis /= diff_time_t;
+        int64_t adj = diff_millis - int64_t(1000) * 1000;
+        emastat.Next(adj);
+        if (current_connection) {
+          (*current_connection) << "dmiln: " << diff_millis << " ema: " << emastat.GetEma() << " var: " << emastat.GetVar() << "\n";
+        }
+      }
+    }
+    prev_millis_ = sample_millis;
+    prev_time_t_ = sample_time_t;
+  }
+ private:
+  uint32_t prev_millis_ = 0;
+  uint32_t prev_time_t_ = 0;
+  EmaStat emastat;
+} tmgr;
+
 struct JobTime {
   unsigned hour;
   unsigned minute;
@@ -543,8 +602,10 @@ void loop() {
   current_connection = &connection;
   connection << "Wakeup " << millis() << "\n";
   connection.CallNtpServer();
-  if (connection.GetNtpResult(&last_millis, &last_time_t))
+  if (connection.GetNtpResult(&last_millis, &last_time_t)) {
+    tmgr.AddSample(last_millis, last_time_t);
     time_valid = true;
+  }
   if (!time_valid) {
     wait_until = millis() + kInterval;
     current_connection = nullptr;
