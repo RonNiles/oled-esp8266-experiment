@@ -4,7 +4,7 @@
 
 #include <set>
 
-constexpr int time_zone = -7;
+static int time_zone = -7;
 
 /***************************************************************************************
  * U8g2: Implements 4 lines of text and a progress box on top of the U8g2 interface
@@ -372,6 +372,20 @@ class Interactive : public JobInputOutput{
       RunFeeder();
     } else if (SelectOption("Show Information")) {
       ShowInformation();
+    } else if (SelectOption("Time Zone")) {
+      WaitButtonReleased();
+      if (SelectOption("GMT - 8")) {
+        time_zone = -8;
+      } else if (SelectOption("GMT - 7")) {
+        time_zone = -7;
+      } else if (SelectOption("GMT - 6")) {
+        time_zone = -6;
+      } else if (SelectOption("GMT - 5")) {
+        time_zone = -5;
+      } else if (SelectOption("GMT - 4")) {
+        time_zone = -4;
+      }
+      ShowInformation();
     }
     WaitButtonReleased();
     u8g2->Off();  /* OLED power off */
@@ -423,6 +437,7 @@ class Interactive : public JobInputOutput{
 //    EpochToUtc(last_time_t, &y, &m, &d, &hh, &mm, &ss);
     u8g2->Reset();
     u8g2->GetLineBuf(0) << "Millis: " << uint32_t(millis());
+    u8g2->GetLineBuf(1) << "Time Zone: " << time_zone;
 //    u8g2->GetLineBuf(1) << "Date: " << y << "-" << m << "-" << d;
 //    u8g2->GetLineBuf(2) << "Time: " << hh << ":" << mm << ":" << ss;
     u8g2->GetLineBuf(3) <<  "********-********";
