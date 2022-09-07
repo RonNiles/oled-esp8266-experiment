@@ -1,9 +1,9 @@
-#include <U8g2lib.h>
 #include <ESP8266WiFi.h>
+#include <U8g2lib.h>
 #include <WiFiUdp.h>
 
-#include <set>
 #include <map>
+#include <set>
 
 static int time_zone = -7;
 
@@ -12,7 +12,7 @@ static int time_zone = -7;
  ***************************************************************************************/
 class U8g2 {
  public:
-  U8g2() : u8g2_(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE) {
+  U8g2() : u8g2_(U8G2_R0, /* clock=*/SCL, /* data=*/SDA, /* reset=*/U8X8_PIN_NONE) {
     u8g2_.begin();
     u8g2_.setFont(u8g2_font_6x10_tf);
     u8g2_.setFontRefHeightExtendedText();
@@ -20,7 +20,7 @@ class U8g2 {
     u8g2_.setFontPosTop();
     u8g2_.setFontDirection(0);
 
-    Off();  /* OLED power off */
+    Off(); /* OLED power off */
     Reset();
   }
 
@@ -33,17 +33,13 @@ class U8g2 {
     box_ = -1;
   }
 
-  void Off() {
-    u8g2_.setPowerSave(1);  /* OLED power off */
-  }
+  void Off() { u8g2_.setPowerSave(1); /* OLED power off */ }
 
-  void On() {
-    u8g2_.setPowerSave(0);  /* OLED power on */
-  }
+  void On() { u8g2_.setPowerSave(0); /* OLED power on */ }
 
   class LineBuf {
    public:
-    LineBuf &operator <<(int32_t var) {
+    LineBuf &operator<<(int32_t var) {
       if (ofs_ < 22) {
         int len = snprintf(line_ + ofs_, 22 - ofs_, "%ld", var);
         ofs_ += len;
@@ -52,16 +48,16 @@ class U8g2 {
       return *this;
     }
 
-    LineBuf &operator <<(const char *ptr) {
+    LineBuf &operator<<(const char *ptr) {
       for (;;) {
         if (ofs_ >= 22) {
           line_[21] = '\0';
           break;
         }
         line_[ofs_] = *ptr;
-        if (*ptr == '\0')
-          break;
-        ++ptr; ++ofs_;
+        if (*ptr == '\0') break;
+        ++ptr;
+        ++ofs_;
       }
       return *this;
     }
@@ -80,12 +76,10 @@ class U8g2 {
     u8g2_.firstPage();
     do {
       for (int i = 0; i < 4; ++i) {
-        if (lines_[i][0] != '\0')
-          u8g2_.drawStr(0, 16 * i, lines_[i]);
+        if (lines_[i][0] != '\0') u8g2_.drawStr(0, 16 * i, lines_[i]);
       }
-      if (box_ >= 0)
-        u8g2_.drawBox(box_ * 32, 10, 32, 6);
-    } while( u8g2_.nextPage());
+      if (box_ >= 0) u8g2_.drawBox(box_ * 32, 10, 32, 6);
+    } while (u8g2_.nextPage());
   }
 
  private:
@@ -106,10 +100,9 @@ static U8g2 *u8g2 = nullptr;
  ***************************************************************************************/
 class Connection {
  public:
-  Connection() { }
+  Connection() {}
   ~Connection() {
-    if (connected_)
-      DisableWifi();
+    if (connected_) DisableWifi();
   }
 
   bool Connected() const { return connected_; }
@@ -123,7 +116,7 @@ class Connection {
     WiFi.persistent(false);
 
     // Bring up the WiFi connection
-    WiFi.mode( WIFI_STA );
+    WiFi.mode(WIFI_STA);
     WiFi.begin("ssid", "pwd");
 
     for (int retries = 0;; ++retries) {
@@ -140,16 +133,16 @@ class Connection {
   }
 
   static void DisableWifi() {
-    WiFi.mode( WIFI_OFF );
+    WiFi.mode(WIFI_OFF);
     WiFi.forceSleepBegin();
-    delay( 1 );
+    delay(1);
   }
 
   void CallNtpServer() {
     if (!connected_) return;
     WiFiUDP udp;
     udp.begin(kLocalPort);
-    IPAddress timeServerIP(10, 0, 0, 14);  /* local reference machine */
+    IPAddress timeServerIP(10, 0, 0, 14); /* local reference machine */
 
     /* NTP time stamp is in the first 48 bytes of the message */
     constexpr int kNtpPacketSize = 48;
@@ -158,18 +151,18 @@ class Connection {
     // set all bytes in the buffer to 0
     memset(packetBuffer, 0, sizeof(packetBuffer));
     // Initialize values needed to form NTP request
-    packetBuffer[0] = 0b11100011;   // LI, Version, Mode
-    packetBuffer[1] = 0;     // Stratum, or type of clock
-    packetBuffer[2] = 6;     // Polling Interval
-    packetBuffer[3] = 0xEC;  // Peer Clock Precision
+    packetBuffer[0] = 0b11100011;  // LI, Version, Mode
+    packetBuffer[1] = 0;           // Stratum, or type of clock
+    packetBuffer[2] = 6;           // Polling Interval
+    packetBuffer[3] = 0xEC;        // Peer Clock Precision
     // 8 bytes of zero for Root Delay & Root Dispersion
-    packetBuffer[12]  = 49;
-    packetBuffer[13]  = 0x4E;
-    packetBuffer[14]  = 49;
-    packetBuffer[15]  = 52;
+    packetBuffer[12] = 49;
+    packetBuffer[13] = 0x4E;
+    packetBuffer[14] = 49;
+    packetBuffer[15] = 52;
 
     /* all NTP fields have been given values. Send a packet requesting a timestamp  */
-    udp.beginPacket(timeServerIP, 123); //NTP requests are to port 123
+    udp.beginPacket(timeServerIP, 123);  // NTP requests are to port 123
     udp.write(packetBuffer, sizeof(packetBuffer));
     udp.endPacket();
 
@@ -181,7 +174,8 @@ class Connection {
         delay(50);
         continue;
       }
-      udp_len = udp.read(packetBuffer, sizeof(packetBuffer)); // read the packet into the buffer
+      udp_len = udp.read(packetBuffer,
+                         sizeof(packetBuffer));  // read the packet into the buffer
       break;
     }
 
@@ -207,21 +201,19 @@ class Connection {
     return true;
   }
 
-  class Connection& operator<<(const char *ptr) {
+  class Connection &operator<<(const char *ptr) {
     if (!connected_ || report_ptr_ >= sizeof(report_)) return *this;
     char *buf = (char *)report_;
-    int len = snprintf(buf + report_ptr_, sizeof(report_) - report_ptr_,
-      "%s", ptr);
+    int len = snprintf(buf + report_ptr_, sizeof(report_) - report_ptr_, "%s", ptr);
     report_ptr_ += len;
     FlushIf();
     return *this;
   }
 
-  class Connection& operator<<(int32_t val) {
-    if (!connected_ ||report_ptr_ >= sizeof(report_)) return *this;
+  class Connection &operator<<(int32_t val) {
+    if (!connected_ || report_ptr_ >= sizeof(report_)) return *this;
     char *buf = (char *)report_;
-    int len = snprintf(buf + report_ptr_, sizeof(report_) - report_ptr_,
-      "%d", val);
+    int len = snprintf(buf + report_ptr_, sizeof(report_) - report_ptr_, "%d", val);
     report_ptr_ += len;
     FlushIf();
     return *this;
@@ -241,7 +233,7 @@ class Connection {
     report_[sizeof(report_) - 1] = '\0';
     report_[sizeof(report_) - 2] = '\n';
     static int ofs = 0;
-    IPAddress receiver(10,0,0,14);
+    IPAddress receiver(10, 0, 0, 14);
     WiFiClient client;
 
     int rc;
@@ -280,9 +272,7 @@ static Connection *current_connection = nullptr;
  ***************************************************************************************/
 class JobInputOutput {
  public:
-  static void Setup() {
-   pinMode(D8, INPUT_PULLUP);
-  }
+  static void Setup() { pinMode(D8, INPUT_PULLUP); }
 
   static void ActivatePump(long *level_reached_msec, long *pump_off_msec) {
     pinMode(D5, INPUT);
@@ -293,17 +283,14 @@ class JobInputOutput {
     pinMode(D7, OUTPUT);
     while (int32_t(millis() - end_millis) < 0) {
       delay(10);
-      if (ButtonPressed())
-        break;
+      if (ButtonPressed()) break;
       if (digitalRead(D5) == HIGH) {
-        if (level_reached_msec)
-          *level_reached_msec = long(millis() - start_millis);
+        if (level_reached_msec) *level_reached_msec = long(millis() - start_millis);
         break;
       }
     }
     pinMode(D7, INPUT);
-    if (pump_off_msec)
-      *pump_off_msec = long(millis() - start_millis);
+    if (pump_off_msec) *pump_off_msec = long(millis() - start_millis);
   }
 
   static void ActivateFeeder(unsigned msec) {
@@ -312,8 +299,7 @@ class JobInputOutput {
     unsigned long start = millis();
     do {
       delay(100);
-      if (ButtonPressed())
-        break;
+      if (ButtonPressed()) break;
     } while (millis() - start < msec);
     pinMode(D6, INPUT);
     delay(1000);
@@ -324,14 +310,12 @@ class JobInputOutput {
     long pump_off_ms, level_reached_ms = -1;
     ActivatePump(&level_reached_ms, &pump_off_ms);
     if (current_connection) {
-      (*current_connection) <<  "Level reached " << level_reached_ms;
-      (*current_connection) <<  ", Pump off " <<  pump_off_ms << "\n";
+      (*current_connection) << "Level reached " << level_reached_ms;
+      (*current_connection) << ", Pump off " << pump_off_ms << "\n";
     }
   }
 
-  static bool ButtonPressed() {
-   return digitalRead(D8) == HIGH;
-  }
+  static bool ButtonPressed() { return digitalRead(D8) == HIGH; }
 
   static void inline DebounceWait(bool (*fn)()) {
     uint32_t start_millis = millis();
@@ -342,8 +326,7 @@ class JobInputOutput {
       } else if (++countdown > 4) {
         break;
       }
-      if (millis() - start_millis > 5000)
-        break;
+      if (millis() - start_millis > 5000) break;
       delay(50);
     }
   }
@@ -360,7 +343,7 @@ class JobInputOutput {
 /***************************************************************************************
  * Interactive: for button presses and screen displays
  ***************************************************************************************/
-class Interactive : public JobInputOutput{
+class Interactive : public JobInputOutput {
  public:
   static void Check() {
     if (ButtonPressed()) {
@@ -368,6 +351,7 @@ class Interactive : public JobInputOutput{
       RunInteractive();
     }
   }
+
  private:
   static void RunInteractive() {
     WaitButtonReleased();
@@ -394,7 +378,7 @@ class Interactive : public JobInputOutput{
       ShowInformation();
     }
     WaitButtonReleased();
-    u8g2->Off();  /* OLED power off */
+    u8g2->Off(); /* OLED power off */
   }
 
   static bool SelectOption(char *opt) {
@@ -405,8 +389,7 @@ class Interactive : public JobInputOutput{
       u8g2->Display();
       for (int j = 0; j < 5; ++j) {
         delay(100);
-        if (ButtonPressed())
-          return true;
+        if (ButtonPressed()) return true;
       }
     }
     return false;
@@ -421,8 +404,8 @@ class Interactive : public JobInputOutput{
     long pump_off_ms, level_reached_ms = -1;
     ActivatePump(&level_reached_ms, &pump_off_ms);
     u8g2->Reset();
-    u8g2->GetLineBuf(0) <<  "Level reached " << level_reached_ms;
-    u8g2->GetLineBuf(1) <<  "Pump off " <<  pump_off_ms;
+    u8g2->GetLineBuf(0) << "Level reached " << level_reached_ms;
+    u8g2->GetLineBuf(1) << "Pump off " << pump_off_ms;
     u8g2->Display();
     WaitButtonReleased();
     WaitButtonPressed();
@@ -440,13 +423,13 @@ class Interactive : public JobInputOutput{
   static void ShowInformation() {
     WaitButtonReleased();
     int y, m, d, hh, mm, ss;
-//    EpochToUtc(last_time_t, &y, &m, &d, &hh, &mm, &ss);
+    //    EpochToUtc(last_time_t, &y, &m, &d, &hh, &mm, &ss);
     u8g2->Reset();
     u8g2->GetLineBuf(0) << "Millis: " << uint32_t(millis());
     u8g2->GetLineBuf(1) << "Time Zone: " << time_zone;
-//    u8g2->GetLineBuf(1) << "Date: " << y << "-" << m << "-" << d;
-//    u8g2->GetLineBuf(2) << "Time: " << hh << ":" << mm << ":" << ss;
-    u8g2->GetLineBuf(3) <<  "********-********";
+    //    u8g2->GetLineBuf(1) << "Date: " << y << "-" << m << "-" << d;
+    //    u8g2->GetLineBuf(2) << "Time: " << hh << ":" << mm << ":" << ss;
+    u8g2->GetLineBuf(3) << "********-********";
     u8g2->Display();
     WaitButtonPressed();
   }
@@ -458,9 +441,11 @@ class Interactive : public JobInputOutput{
    * 03/01/0000 for convenience of calculation. Once the numbers are obtained, they can be
    * easily translated to calendar numbers.
    *
-   * Some detailed ref to the algorithm: http://howardhinnant.github.io/date_algorithms.html
+   * Some detailed ref to the algorithm:
+   * http://howardhinnant.github.io/date_algorithms.html
    */
-  static void EpochToUtc(uint32_t epoch, int *y, int *m, int *d, int *hh, int *mm, int *ss) {
+  static void EpochToUtc(uint32_t epoch, int *y, int *m, int *d, int *hh, int *mm,
+                         int *ss) {
     const uint32_t kEpochToRef = 719468;
     const uint32_t kSecsPerDay = 86400;
     const uint32_t kSecsPerHour = 3600;
@@ -476,11 +461,10 @@ class Interactive : public JobInputOutput{
     /* the day number within the era */
     uint32_t doe = days_from_ref - era * kDaysPerEra;
     /* the year number within the era */
-    uint32_t yoe = (doe
-               - doe / 1460 /* leap day every 4 yrs (1460 days) */
-               + doe / 36524 /* no leap day every 100 yrs (36524 days) */
-               - (doe == 146096 ? 1 : 0)) /* leap day every 400 yrs */
-              / kDaysPerYear;
+    uint32_t yoe = (doe - doe / 1460 /* leap day every 4 yrs (1460 days) */
+                    + doe / 36524    /* no leap day every 100 yrs (36524 days) */
+                    - (doe == 146096 ? 1 : 0)) /* leap day every 400 yrs */
+                   / kDaysPerYear;
     /* the day number within the year; days start counting from Mar 1st */
     uint32_t doy = doe - (yoe * kDaysPerYear + yoe / 4 - yoe / 100);
     /* month number from day number within the year; starts counting from Mar 1st */
@@ -502,8 +486,8 @@ class Interactive : public JobInputOutput{
   }
 };
 
-#define precision  8
-#define log_alpha  6
+#define precision 8
+#define log_alpha 6
 
 struct EmaStat {
   int32_t ema = 0;
@@ -552,13 +536,16 @@ class TimeManager {
       if (diff_time_t >= kMinSeconds) {
         /* scale the millis to 1000 seconds for PPM */
         if (current_connection)
-          (*current_connection) << "dtt: " << diff_time_t << " dmil: " << diff_millis << "\n";
+          (*current_connection)
+              << "dtt: " << diff_time_t << " dmil: " << diff_millis << "\n";
         diff_millis *= 1000;
         diff_millis /= diff_time_t;
         int64_t adj = diff_millis - int64_t(1000) * 1000;
         emastat.Next(adj);
         if (current_connection) {
-          (*current_connection) << "dmiln: " << diff_millis << " ema: " << emastat.GetEma() << " var: " << emastat.GetVar() << "\n";
+          (*current_connection)
+              << "dmiln: " << diff_millis << " ema: " << emastat.GetEma()
+              << " var: " << emastat.GetVar() << "\n";
         }
       }
     }
@@ -568,9 +555,11 @@ class TimeManager {
         (*current_connection) << "(" << item.first << "," << item.second << ") ";
       (*current_connection) << "\n";
     }
-    if (recent_samples_.empty() || sample_time_t - std::prev(recent_samples_.end())->first >= kMinSeconds)
+    if (recent_samples_.empty() ||
+        sample_time_t - std::prev(recent_samples_.end())->first >= kMinSeconds)
       recent_samples_.emplace(sample_time_t, sample_millis);
-    while (recent_samples_.size() > 1 && sample_time_t - recent_samples_.begin()->first >= kMaxSeconds)
+    while (recent_samples_.size() > 1 &&
+           sample_time_t - recent_samples_.begin()->first >= kMaxSeconds)
       recent_samples_.erase(recent_samples_.begin());
     if (current_connection) {
       (*current_connection) << "Post: ";
@@ -601,8 +590,7 @@ class JobManager {
   bool RunJobs() {
     uint32_t current_millis = millis();
     int32_t remaining = int32_t(wait_until_ - current_millis);
-    if (remaining > 0)
-      return false;
+    if (remaining > 0) return false;
     Connection connection;
     bool tried_connection = false;
 
@@ -614,8 +602,7 @@ class JobManager {
       current_connection = &connection;
       tmgr.Update();
       tried_connection = true;
-      if (connection.Connected())
-        prev_connect_ = current_millis;
+      if (connection.Connected()) prev_connect_ = current_millis;
     };
 
     if (!tmgr.ValidTime()) {
@@ -646,8 +633,7 @@ class JobManager {
     while (!pending_jobs_.empty()) {
       uint32_t next_job = *pending_jobs_.begin();
       now = tmgr.GuessCurrentTime();
-      if (now < next_job)
-        break;
+      if (now < next_job) break;
       do_connect();
       connection << "Connected because job will run\n";
       most_recent_job = next_job;
@@ -681,11 +667,9 @@ class JobManager {
       uint32_t next_job = last_day;
       next_job += uint32_t(job.minute) * 60;
       next_job += uint32_t(job.hour) * 60 * 60;
-      if (next_job > newer_than)
-        pending_jobs_.insert(next_job);
+      if (next_job > newer_than) pending_jobs_.insert(next_job);
       next_job += 86400;
-      if (next_job > newer_than)
-        pending_jobs_.insert(next_job);
+      if (next_job > newer_than) pending_jobs_.insert(next_job);
     }
     if (current_connection) {
       (*current_connection) << "Jobs in";
@@ -714,6 +698,5 @@ void setup() {
 }
 
 void loop() {
-  if (!job_manager->RunJobs())
-    Interactive::Check();
+  if (!job_manager->RunJobs()) Interactive::Check();
 }
