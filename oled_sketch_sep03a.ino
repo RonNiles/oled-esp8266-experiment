@@ -534,13 +534,11 @@ class TimeManager {
       uint32_t diff_time_t = sample_time_t - recent_samples_.begin()->first;
       uint32_t diff_millis = sample_millis - recent_samples_.begin()->second;
       if (diff_time_t >= kMinSeconds) {
-        /* scale the millis to 1000 seconds for PPM */
+        int64_t adj = int64_t(diff_millis) * 1000 / diff_time_t - int64_t(1000) * 1000;
+        /* scale the millis to 1000 seconds for Parts Per Million */
         if (current_connection)
-          (*current_connection)
-              << "dtt: " << diff_time_t << " dmil: " << diff_millis << "\n";
-        diff_millis *= 1000;
-        diff_millis /= diff_time_t;
-        int64_t adj = diff_millis - int64_t(1000) * 1000;
+          (*current_connection) << "dtt: " << diff_time_t << " dmil: " << diff_millis
+                                << " adj: " << adj << "\n";
         emastat.Next(adj);
         if (current_connection) {
           (*current_connection)
