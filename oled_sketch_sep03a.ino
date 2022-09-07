@@ -3,6 +3,7 @@
 #include <WiFiUdp.h>
 
 #include <set>
+#include <map>
 
 static int time_zone = -7;
 
@@ -105,7 +106,16 @@ static U8g2 *u8g2 = nullptr;
  ***************************************************************************************/
 class Connection {
  public:
-  Connection() {
+  Connection() { }
+  ~Connection() {
+    if (connected_)
+      DisableWifi();
+  }
+
+  bool Connected() const { return connected_; }
+  void Connect() {
+    if (connected_) return;
+
     WiFi.forceSleepWake();
     delay(1);
 
@@ -118,7 +128,7 @@ class Connection {
 
     for (int retries = 0;; ++retries) {
       if (WiFi.status() == WL_CONNECTED) {
-        enabled_ = true;
+        connected_ = true;
         return;
       }
       if (retries >= 300) {
@@ -128,10 +138,6 @@ class Connection {
       delay(50);
     }
   }
-  ~Connection() {
-    if (enabled_)
-      DisableWifi();
-  }
 
   static void DisableWifi() {
     WiFi.mode( WIFI_OFF );
@@ -140,6 +146,7 @@ class Connection {
   }
 
   void CallNtpServer() {
+    if (!connected_) return;
     WiFiUDP udp;
     udp.begin(kLocalPort);
     IPAddress timeServerIP(10, 0, 0, 14);  /* local reference machine */
@@ -201,7 +208,7 @@ class Connection {
   }
 
   class Connection& operator<<(const char *ptr) {
-    if (report_ptr_ >= sizeof(report_)) return *this;
+    if (!connected_ || report_ptr_ >= sizeof(report_)) return *this;
     char *buf = (char *)report_;
     int len = snprintf(buf + report_ptr_, sizeof(report_) - report_ptr_,
       "%s", ptr);
@@ -211,7 +218,7 @@ class Connection {
   }
 
   class Connection& operator<<(int32_t val) {
-    if (report_ptr_ >= sizeof(report_)) return *this;
+    if (!connected_ ||report_ptr_ >= sizeof(report_)) return *this;
     char *buf = (char *)report_;
     int len = snprintf(buf + report_ptr_, sizeof(report_) - report_ptr_,
       "%d", val);
@@ -257,7 +264,7 @@ class Connection {
 
   /* open local port to listen for UDP packets */
   constexpr static unsigned kLocalPort = 2390;
-  bool enabled_ = false;
+  bool connected_ = false;
   bool ntp_valid_ = false;
   uint32_t ntp_millis_;
   uint32_t ntp_time_;
@@ -326,28 +333,27 @@ class JobInputOutput {
    return digitalRead(D8) == HIGH;
   }
 
-  static void inline WaitButtonReleased() {
+  static void inline DebounceWait(bool (*fn)()) {
+    uint32_t start_millis = millis();
     int countdown = 0;
     for (;;) {
-      if (ButtonPressed()) {
+      if (!(*fn)()) {
         countdown = 0;
       } else if (++countdown > 4) {
         break;
       }
+      if (millis() - start_millis > 5000)
+        break;
       delay(50);
     }
   }
 
+  static void inline WaitButtonReleased() {
+    DebounceWait([]() { return !ButtonPressed(); });
+  }
+
   static void inline WaitButtonPressed() {
-    int countdown = 0;
-    for (;;) {
-      if (!ButtonPressed()) {
-        countdown = 0;
-      } else if (++countdown > 4) {
-        break;
-      }
-      delay(50);
-    }
+    DebounceWait([]() { return ButtonPressed(); });
   }
 };
 
@@ -535,14 +541,15 @@ class TimeManager {
     }
   }
 
-  bool ValidTime() const { return prev_time_t_ != 0; }
+  bool ValidTime() const { return !recent_samples_.empty(); }
 
-  /* TODO: EMA should use samples one day or more apart to get accurate PPM from one second resolution */
+  constexpr static uint32_t kMinSeconds = 4 * 3600;
+  constexpr static uint32_t kMaxSeconds = 3 * 86400 + 3600;
   void AddSample(uint32_t sample_millis, uint32_t sample_time_t) {
-    if (prev_time_t_) {
-      uint32_t diff_time_t = sample_time_t - prev_time_t_;
-      uint32_t diff_millis = sample_millis - prev_millis_;
-      if (diff_time_t >= 50 && diff_time_t <= 5000) {
+    if (!recent_samples_.empty()) {
+      uint32_t diff_time_t = sample_time_t - recent_samples_.begin()->first;
+      uint32_t diff_millis = sample_millis - recent_samples_.begin()->second;
+      if (diff_time_t >= kMinSeconds) {
         /* scale the millis to 1000 seconds for PPM */
         if (current_connection)
           (*current_connection) << "dtt: " << diff_time_t << " dmil: " << diff_millis << "\n";
@@ -555,20 +562,34 @@ class TimeManager {
         }
       }
     }
-    prev_millis_ = sample_millis;
-    prev_time_t_ = sample_time_t;
+    if (current_connection) {
+      (*current_connection) << "Pre: ";
+      for (const auto &item : recent_samples_)
+        (*current_connection) << "(" << item.first << "," << item.second << ") ";
+      (*current_connection) << "\n";
+    }
+    if (recent_samples_.empty() || sample_time_t - std::prev(recent_samples_.end())->first >= kMinSeconds)
+      recent_samples_.emplace(sample_time_t, sample_millis);
+    while (recent_samples_.size() > 1 && sample_time_t - recent_samples_.begin()->first >= kMaxSeconds)
+      recent_samples_.erase(recent_samples_.begin());
+    if (current_connection) {
+      (*current_connection) << "Post: ";
+      for (const auto &item : recent_samples_)
+        (*current_connection) << "(" << item.first << "," << item.second << ") ";
+      (*current_connection) << "\n";
+    }
   }
 
   /* TODO use EMA, track millis() rollover */
   uint32_t GuessCurrentTime() {
-    uint32_t now = prev_time_t_;
-    now += (millis() - prev_millis_) / 1000;
+    if (!ValidTime()) return 0;
+    uint32_t now = std::prev(recent_samples_.end())->first;
+    now += (millis() - std::prev(recent_samples_.end())->second) / 1000;
     return now;
   }
 
  private:
-  uint32_t prev_millis_ = 0;
-  uint32_t prev_time_t_ = 0;
+  std::map<uint32_t, uint32_t> recent_samples_;
   EmaStat emastat;
 } tmgr;
 
@@ -583,10 +604,32 @@ class JobManager {
     if (remaining > 0)
       return false;
     Connection connection;
-    current_connection = &connection;
-    connection << "Wakeup " << millis() << "\n";
-    connection.CallNtpServer();
-    tmgr.Update();
+    bool tried_connection = false;
+
+    auto do_connect = [&]() {
+      if (tried_connection) return;
+      connection.Connect();
+      connection.CallNtpServer();
+      connection << "Wakeup " << millis() << "\n";
+      current_connection = &connection;
+      tmgr.Update();
+      tried_connection = true;
+      if (connection.Connected())
+        prev_connect_ = current_millis;
+    };
+
+    if (!tmgr.ValidTime()) {
+      do_connect();
+      connection << "Connected because of invalid time\n";
+    }
+#if 0
+    if (current_millis - prev_connect_ > kInterval * 1000) {
+      uint32_t prev_connect = prev_connect_;
+      do_connect();
+      connection << "Connected because current_millis: " << current_millis << " prev_connect: " << prev_connect << "\n";
+    }
+#endif
+
     if (!tmgr.ValidTime()) {
       wait_until_ = millis() + kInterval * 1000;
       current_connection = nullptr;
@@ -595,6 +638,8 @@ class JobManager {
 
     uint32_t most_recent_job = 0;
     if (pending_jobs_.empty()) {
+      do_connect();
+      connection << "Connected because jobs empty\n";
       RepopulateJobs(tmgr.GuessCurrentTime());
     }
     uint32_t now;
@@ -603,6 +648,8 @@ class JobManager {
       now = tmgr.GuessCurrentTime();
       if (now < next_job)
         break;
+      do_connect();
+      connection << "Connected because job will run\n";
       most_recent_job = next_job;
       pending_jobs_.erase(pending_jobs_.begin());
       JobInputOutput::ExecuteJob();
@@ -653,6 +700,7 @@ class JobManager {
   constexpr static unsigned kInterval = 10 * 60; /* 10 minutes */
   constexpr static JobTime jobs_[] = {{8, 40}, {13, 00}, {17, 30}};
   uint32_t wait_until_ = 0;
+  uint32_t prev_connect_ = 0;
   std::set<uint32_t> pending_jobs_;
 };
 
