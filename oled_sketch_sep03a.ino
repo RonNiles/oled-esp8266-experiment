@@ -1,3 +1,4 @@
+#include <EEPROM.h>
 #include <ESP8266WiFi.h>
 #include <U8g2lib.h>
 #include <WiFiUdp.h>
@@ -364,6 +365,7 @@ class Interactive : public JobInputOutput {
       ShowInformation();
     } else if (SelectOption("Time Zone")) {
       WaitButtonReleased();
+      int prev_time_zone = time_zone;
       if (SelectOption("GMT - 8")) {
         time_zone = -8;
       } else if (SelectOption("GMT - 7")) {
@@ -374,6 +376,12 @@ class Interactive : public JobInputOutput {
         time_zone = -5;
       } else if (SelectOption("GMT - 4")) {
         time_zone = -4;
+      }
+      if (time_zone != prev_time_zone) {
+        EEPROM.write(256, 'T');
+        EEPROM.write(257, 'Z');
+        EEPROM.write(258, time_zone);
+        EEPROM.commit();
       }
       ShowInformation();
     }
@@ -693,6 +701,9 @@ void setup() {
   JobInputOutput::Setup();
   u8g2 = new U8g2;
   job_manager = new JobManager;
+  EEPROM.begin(512);
+  if (EEPROM.read(256) == 'T' && EEPROM.read(257) == 'Z')
+    time_zone = int8_t(EEPROM.read(258));
 }
 
 void loop() {
