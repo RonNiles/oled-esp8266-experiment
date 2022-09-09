@@ -220,6 +220,48 @@ class Connection {
     return *this;
   }
 
+  class Connection &operator<<(uint32_t val) {
+    if (!connected_ || report_ptr_ >= sizeof(report_)) return *this;
+    char *buf = (char *)report_;
+    int len = snprintf(buf + report_ptr_, sizeof(report_) - report_ptr_, "%u", val);
+    report_ptr_ += len;
+    FlushIf();
+    return *this;
+  }
+
+  class Connection &operator<<(uint64_t val) {
+    if (!connected_ || report_ptr_ >= sizeof(report_)) return *this;
+
+    int groups[7];
+    int gptr = 0;
+    while (val) {
+      groups[gptr++] = val % 1000;
+      val /= 1000;
+    }
+    if (gptr == 0) groups[gptr++] = 0;
+    bool first = true;
+    while (gptr) {
+      char *buf = (char *)report_;
+      int len = snprintf(buf + report_ptr_, sizeof(report_) - report_ptr_,
+                         (first ? "%d" : "%03d"), groups[--gptr]);
+      first = false;
+      report_ptr_ += len;
+      if (gptr) report_[report_ptr_++] = ',';
+      FlushIf();
+    }
+    return *this;
+  }
+
+  class Connection &operator<<(int64_t val) {
+    if (!connected_ || report_ptr_ >= sizeof(report_)) return *this;
+    FlushIf();
+    if (val < 0) {
+      report_[report_ptr_++] = '-';
+      val = -val;
+    }
+    return operator<<(uint64_t(val));
+  }
+
  private:
   void FlushIf() {
     if (report_ptr_ >= sizeof(report_)) {
@@ -275,7 +317,7 @@ class JobInputOutput {
  public:
   static void Setup() { pinMode(D8, INPUT_PULLUP); }
 
-  static void ActivatePump(long *level_reached_msec, long *pump_off_msec) {
+  static void ActivatePump(int32_t *level_reached_msec, int32_t *pump_off_msec) {
     pinMode(D5, INPUT);
 
     uint32_t start_millis = millis();
@@ -286,12 +328,12 @@ class JobInputOutput {
       delay(10);
       if (ButtonPressed()) break;
       if (digitalRead(D5) == HIGH) {
-        if (level_reached_msec) *level_reached_msec = long(millis() - start_millis);
+        if (level_reached_msec) *level_reached_msec = int32_t(millis() - start_millis);
         break;
       }
     }
     pinMode(D7, INPUT);
-    if (pump_off_msec) *pump_off_msec = long(millis() - start_millis);
+    if (pump_off_msec) *pump_off_msec = int32_t(millis() - start_millis);
   }
 
   static void ActivateFeeder(unsigned msec) {
@@ -308,7 +350,7 @@ class JobInputOutput {
 
   static void ExecuteJob() {
     ActivateFeeder(15000);
-    long pump_off_ms, level_reached_ms = -1;
+    int32_t pump_off_ms, level_reached_ms = -1;
     ActivatePump(&level_reached_ms, &pump_off_ms);
     if (current_connection) {
       (*current_connection) << "Level reached " << level_reached_ms;
@@ -409,7 +451,7 @@ class Interactive : public JobInputOutput {
     u8g2->GetLineBuf(0) << "Running Pump until full";
     u8g2->GetLineBuf(1) << "Press Button to terminate";
     u8g2->Display();
-    long pump_off_ms, level_reached_ms = -1;
+    int32_t pump_off_ms, level_reached_ms = -1;
     ActivatePump(&level_reached_ms, &pump_off_ms);
     u8g2->Reset();
     u8g2->GetLineBuf(0) << "Level reached " << level_reached_ms;
@@ -494,12 +536,12 @@ class Interactive : public JobInputOutput {
   }
 };
 
-#define precision 8
+#define precision 1
 #define log_alpha 6
 
 struct EmaStat {
-  int32_t ema = 0;
-  uint32_t var = 0;
+  int64_t ema = 0;
+  uint64_t var = 0;
   int count = 0;
   int shift = -1;
 
@@ -514,13 +556,13 @@ struct EmaStat {
         ++shift;
       }
     }
-    int32_t diff = (sample << shift) - ema;
+    int64_t diff = (sample << shift) - ema;
     ema += (diff >> shift);
-    var += diff * diff >> (shift * 2);
+    var += int64_t(diff) * diff >> (shift * 2);
     var -= (var >> shift);
   }
-  int32_t GetEma() { return (ema >> shift) / precision; }
-  uint32_t GetVar() { return (var >> shift) / precision / precision; }
+  int64_t GetEma() { return (ema >> shift) / precision; }
+  uint64_t GetVar() { return (var >> shift) / precision / precision; }
 };
 
 class TimeManager {
@@ -542,16 +584,18 @@ class TimeManager {
       uint32_t diff_time_t = sample_time_t - recent_samples_.begin()->first;
       uint32_t diff_millis = sample_millis - recent_samples_.begin()->second;
       if (diff_time_t >= kMinSeconds) {
-        int64_t adj = int64_t(diff_millis) * 1000 / diff_time_t - int64_t(1000) * 1000;
-        /* scale the millis to 1000 seconds for Parts Per Million */
+        /* scale the millis to 1000000 seconds for Parts Per Million */
+        int64_t diff_ms = int64_t(diff_millis) - 1000 * int64_t(diff_time_t);
+        int64_t diff_ppb = diff_ms * 1000000 / diff_time_t;
         if (current_connection)
-          (*current_connection) << "dtt: " << diff_time_t << " dmil: " << diff_millis
-                                << " adj: " << adj << "\n";
-        emastat.Next(adj);
+          (*current_connection)
+              << "dtt: " << diff_time_t << " dmil: " << diff_millis
+              << " diff_ms: " << diff_ms << " diff_ppb: " << diff_ppb << "\n";
+        emastat.Next(diff_ppb);
         if (current_connection) {
           (*current_connection)
-              << "dmiln: " << diff_millis << " ema: " << emastat.GetEma()
-              << " var: " << emastat.GetVar() << "\n";
+              << "ema: " << emastat.GetEma() << " var: " << emastat.GetVar()
+              << " sd: " << uint32_t(sqrt(emastat.GetVar())) << "\n";
         }
       }
     }
@@ -604,7 +648,7 @@ class JobManager {
       if (tried_connection) return;
       connection.Connect();
       connection.CallNtpServer();
-      connection << "Wakeup " << millis() << "\n";
+      connection << "Wakeup " << uint32_t(millis()) << "\n";
       current_connection = &connection;
       tmgr.Update();
       tried_connection = true;
