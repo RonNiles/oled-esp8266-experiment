@@ -94,6 +94,32 @@ class U8g2 {
 static U8g2 *u8g2 = nullptr;
 
 /***************************************************************************************
+ * InformationPage: inherit from this page and register for callback to display
+ *information
+ ***************************************************************************************/
+class InformationPage {
+ public:
+  virtual void ShowInformationPage() = 0;
+
+  template <class T>
+  static void EnumInformationPages(const T &t) {
+    for (InformationPage *page = pages_; page != nullptr; page = page->next_) t(page);
+  }
+
+ protected:
+  void RegisterInformationPage() {
+    InformationPage **page = &pages_;
+    while (*page != nullptr) page = &(*page)->next_;
+    *page = this;
+  }
+
+ private:
+  InformationPage *next_ = nullptr;
+  static InformationPage *pages_;
+};
+InformationPage *InformationPage::pages_ = nullptr;
+
+/***************************************************************************************
  * Connection class
  *   - turns Wifi on and off as needed
  *   - Does NTP to determine the UTC time
@@ -471,70 +497,64 @@ class Interactive : public JobInputOutput {
   }
 
   static void ShowInformation() {
-    WaitButtonReleased();
-    int y, m, d, hh, mm, ss;
-    //    EpochToUtc(last_time_t, &y, &m, &d, &hh, &mm, &ss);
-    u8g2->Reset();
-    u8g2->GetLineBuf(0) << "Millis: " << uint32_t(millis());
-    u8g2->GetLineBuf(1) << "Time Zone: " << time_zone;
-    //    u8g2->GetLineBuf(1) << "Date: " << y << "-" << m << "-" << d;
-    //    u8g2->GetLineBuf(2) << "Time: " << hh << ":" << mm << ":" << ss;
-    u8g2->GetLineBuf(3) << "********-********";
-    u8g2->Display();
-    WaitButtonPressed();
-  }
-
-  /**
-   * Convert an epoch time to UTC date and time.
-   *
-   * The function calculates the date numbers relative to a calendar that starts from
-   * 03/01/0000 for convenience of calculation. Once the numbers are obtained, they can be
-   * easily translated to calendar numbers.
-   *
-   * Some detailed ref to the algorithm:
-   * http://howardhinnant.github.io/date_algorithms.html
-   */
-  static void EpochToUtc(uint32_t epoch, int *y, int *m, int *d, int *hh, int *mm,
-                         int *ss) {
-    const uint32_t kEpochToRef = 719468;
-    const uint32_t kSecsPerDay = 86400;
-    const uint32_t kSecsPerHour = 3600;
-    const uint32_t kSecsPerMinute = 60;
-    const uint32_t kDaysPerEra = 146097;
-    const uint32_t kDaysPerYear = 365;
-    const uint32_t kYearsPerEra = 400;
-    uint32_t days_from_epoch = epoch / kSecsPerDay;
-    /* shift the reference from epoch to 03/01/0000 */
-    uint32_t days_from_ref = days_from_epoch + kEpochToRef;
-    /* the era (400 yrs) number that the date is in; each era has 146097 days */
-    uint32_t era = days_from_ref / kDaysPerEra;
-    /* the day number within the era */
-    uint32_t doe = days_from_ref - era * kDaysPerEra;
-    /* the year number within the era */
-    uint32_t yoe = (doe - doe / 1460 /* leap day every 4 yrs (1460 days) */
-                    + doe / 36524    /* no leap day every 100 yrs (36524 days) */
-                    - (doe == 146096 ? 1 : 0)) /* leap day every 400 yrs */
-                   / kDaysPerYear;
-    /* the day number within the year; days start counting from Mar 1st */
-    uint32_t doy = doe - (yoe * kDaysPerYear + yoe / 4 - yoe / 100);
-    /* month number from day number within the year; starts counting from Mar 1st */
-    uint32_t moy = (5 * doy + 2) / 153;
-    /* day number within the month */
-    uint32_t dom = doy - (153 * moy + 2) / 5;
-    /* calculate the calendar dates */
-    *d = dom + 1;
-    *m = moy > 9 ? moy - 9 : moy + 3;
-    *y = yoe + era * kYearsPerEra + (moy > 9 ? 1 : 0); /* moy 10 and 11 are Jan and Feb of
-                                                         the next calendar year */
-    /* calculate the time */
-    epoch -= (days_from_epoch * kSecsPerDay);
-    *hh = epoch / kSecsPerHour;
-    epoch -= (*hh * kSecsPerHour);
-    *mm = epoch / kSecsPerMinute;
-    epoch -= (*mm * kSecsPerMinute);
-    *ss = epoch;
+    InformationPage::EnumInformationPages([&](InformationPage *info) {
+      info->ShowInformationPage();
+      WaitButtonPressed();
+      WaitButtonReleased();
+    });
   }
 };
+
+/**
+ * Convert an epoch time to UTC date and time.
+ *
+ * The function calculates the date numbers relative to a calendar that starts from
+ * 03/01/0000 for convenience of calculation. Once the numbers are obtained, they can be
+ * easily translated to calendar numbers.
+ *
+ * Some detailed ref to the algorithm:
+ * http://howardhinnant.github.io/date_algorithms.html
+ */
+static void EpochToUtc(uint32_t epoch, int *y, int *m, int *d, int *hh, int *mm,
+                       int *ss) {
+  const uint32_t kEpochToRef = 719468;
+  const uint32_t kSecsPerDay = 86400;
+  const uint32_t kSecsPerHour = 3600;
+  const uint32_t kSecsPerMinute = 60;
+  const uint32_t kDaysPerEra = 146097;
+  const uint32_t kDaysPerYear = 365;
+  const uint32_t kYearsPerEra = 400;
+  uint32_t days_from_epoch = epoch / kSecsPerDay;
+  /* shift the reference from epoch to 03/01/0000 */
+  uint32_t days_from_ref = days_from_epoch + kEpochToRef;
+  /* the era (400 yrs) number that the date is in; each era has 146097 days */
+  uint32_t era = days_from_ref / kDaysPerEra;
+  /* the day number within the era */
+  uint32_t doe = days_from_ref - era * kDaysPerEra;
+  /* the year number within the era */
+  uint32_t yoe = (doe - doe / 1460           /* leap day every 4 yrs (1460 days) */
+                  + doe / 36524              /* no leap day every 100 yrs (36524 days) */
+                  - (doe == 146096 ? 1 : 0)) /* leap day every 400 yrs */
+                 / kDaysPerYear;
+  /* the day number within the year; days start counting from Mar 1st */
+  uint32_t doy = doe - (yoe * kDaysPerYear + yoe / 4 - yoe / 100);
+  /* month number from day number within the year; starts counting from Mar 1st */
+  uint32_t moy = (5 * doy + 2) / 153;
+  /* day number within the month */
+  uint32_t dom = doy - (153 * moy + 2) / 5;
+  /* calculate the calendar dates */
+  *d = dom + 1;
+  *m = moy > 9 ? moy - 9 : moy + 3;
+  *y = yoe + era * kYearsPerEra + (moy > 9 ? 1 : 0); /* moy 10 and 11 are Jan and Feb of
+                                                       the next calendar year */
+  /* calculate the time */
+  epoch -= (days_from_epoch * kSecsPerDay);
+  *hh = epoch / kSecsPerHour;
+  epoch -= (*hh * kSecsPerHour);
+  *mm = epoch / kSecsPerMinute;
+  epoch -= (*mm * kSecsPerMinute);
+  *ss = epoch;
+}
 
 #define precision 1
 #define log_alpha 6
@@ -565,8 +585,9 @@ struct EmaStat {
   uint64_t GetVar() { return (var >> shift) / precision / precision; }
 };
 
-class TimeManager {
+class TimeManager : public InformationPage {
  public:
+  TimeManager() { RegisterInformationPage(); }
   void Update() {
     if (!current_connection) return;
     uint32_t m;
@@ -630,6 +651,20 @@ class TimeManager {
     return now;
   }
 
+  void ShowInformationPage() override {
+    int y, m, d, hh, mm, ss;
+    char buf[20];
+    EpochToUtc(GuessCurrentTime(), &y, &m, &d, &hh, &mm, &ss);
+    u8g2->Reset();
+    u8g2->GetLineBuf(0) << "Millis: " << uint32_t(millis());
+    u8g2->GetLineBuf(1) << "Time Zone: " << time_zone;
+    sprintf(buf, "%04d-%02d-%02d", y, m, d);
+    u8g2->GetLineBuf(2) << "Date: " << buf;
+    sprintf(buf, "%02d:%02d:%02d", hh, mm, ss);
+    u8g2->GetLineBuf(3) << "Time: " << buf;
+    u8g2->Display();
+  }
+
  private:
   std::map<uint64_t, uint32_t> recent_samples_;
   EmaStat emastat;
@@ -638,8 +673,9 @@ class TimeManager {
 /***************************************************************************************
  * JobManager: Keep track of the job schedule and execute when needed
  ***************************************************************************************/
-class JobManager {
+class JobManager : public InformationPage {
  public:
+  JobManager() { RegisterInformationPage(); }
   bool RunJobs() {
     uint32_t current_millis = millis();
     int32_t remaining = int32_t(wait_until_ - current_millis);
@@ -706,6 +742,21 @@ class JobManager {
     wait_until_ = millis() + (next - now) * 1000;
     current_connection = nullptr;
     return true;
+  }
+  void ShowInformationPage() override {
+    int y, m, d, hh, mm, ss;
+    char buf[20];
+    u8g2->Reset();
+    u8g2->GetLineBuf(0) << "Next Jobs: ";
+    auto it = pending_jobs_.begin();
+    for (int i = 1; i < 4; ++i) {
+      if (it == pending_jobs_.end()) break;
+      EpochToUtc(*it, &y, &m, &d, &hh, &mm, &ss);
+      sprintf(buf, "%02d:%02d:%02d", hh, mm, ss);
+      u8g2->GetLineBuf(i) << buf;
+      ++it;
+    }
+    u8g2->Display();
   }
 
  private:
