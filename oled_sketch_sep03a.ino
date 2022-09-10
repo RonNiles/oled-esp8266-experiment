@@ -168,14 +168,17 @@ class Connection {
     udp.endPacket();
 
     uint32_t millis_now;
-    int retry = 1000000;
+    int retry = 0;
     int udp_len = 0;
-    while (--retry) {
+
+    for (;;) {
       if (udp.parsePacket() != 0) {
         millis_now = millis();
         udp_len = udp.read(packetBuffer, sizeof(packetBuffer));
         break;
       }
+      if (++retry >= 40) break;
+      delay(50);
     }
 
     if (udp_len >= 48) {
@@ -587,7 +590,7 @@ class TimeManager {
         int64_t diff_ppb = diff_ms * 1000000 / diff_time_t;
         if (current_connection)
           (*current_connection)
-              << "dtt: " << diff_time_t * 1000 / 256 << " dmil: " << diff_millis
+              << "dtt: " << uint64_t(diff_time_t) * 1000 / 256 << " dmil: " << diff_millis
               << " diff_ms: " << diff_ms / 256 << " diff_ppb: " << diff_ppb << "\n";
         emastat.Next(diff_ppb);
         if (current_connection) {
