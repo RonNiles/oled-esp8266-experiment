@@ -3,6 +3,7 @@
 #include <U8g2lib.h>
 #include <WiFiUdp.h>
 
+#include <cstring>
 #include <map>
 #include <set>
 
@@ -98,6 +99,25 @@ class U8g2 {
 static U8g2 *u8g2 = nullptr;
 
 /***************************************************************************************
+ * 32-bit millis can roll over in about 2 months, so track rollovers and implement
+ * a 64-bit LongMillis() for when rollover might be a problem
+ ***************************************************************************************/
+class MillisRollover {
+ public:
+  uint64_t LongMillis() {
+    uint32_t now = millis();
+    if (now < prev_millis_)
+      ++millis_rollovers_;
+    prev_millis_ = now;
+    return (int64_t{millis_rollovers_} << 32) | now;
+  }
+
+ private:
+  int millis_rollovers_ = 0;
+  uint32_t prev_millis_ = 0;
+} mr;
+
+/***************************************************************************************
  * InformationPage: inherit from this page and register for callback to display
  *information
  ***************************************************************************************/
@@ -124,6 +144,37 @@ class InformationPage {
   static InformationPage *pages_;
 };
 InformationPage *InformationPage::pages_ = nullptr;
+
+/***************************************************************************************
+ * HiResTime is precise to 1/256 second and is gotten from NTP packet by using the
+ * first of the fractional bytes
+ ***************************************************************************************/
+class HiResTime {
+ public:
+  void SetFromNtp(uint8_t *ntp) {
+    /* We'll take the 4 bytes of seconds plus an additional byte of binary fractional
+     seconds. The result is 256 times the number of seconds */
+    for (int i = 0; i < 5; ++i)
+      time_x_256_ = (time_x_256_ << 8) | ntp[i];
+
+    /* NTP time starts 1/1/1900 while unix time starts 1/1/1970, so subtract 25567 days */
+    time_x_256_ -= uint64_t{25567} * uint64_t{86400} * 256;
+  }
+  HiResTime operator-(const HiResTime &op) {
+    HiResTime res(*this);
+    res.time_x_256_ -= op.time_x_256_;
+    return res;
+  }
+  friend bool operator<(const HiResTime &a, const HiResTime &b);
+  int64_t HiRes() const { return time_x_256_; }
+  uint32_t Seconds() const { return time_x_256_ / 256; }
+
+ private:
+  int64_t time_x_256_ = 0;
+};
+bool operator<(const HiResTime &a, const HiResTime &b) {
+  return a.time_x_256_ < b.time_x_256_;
+}
 
 /***************************************************************************************
  * Connection class
@@ -202,13 +253,12 @@ class Connection {
     udp.write(packetBuffer, sizeof(packetBuffer));
     udp.endPacket();
 
-    uint32_t millis_now;
     int retry = 0;
     int udp_len = 0;
 
     for (;;) {
       if (udp.parsePacket() != 0) {
-        millis_now = millis();
+        ntp_millis_ = mr.LongMillis();
         udp_len = udp.read(packetBuffer, sizeof(packetBuffer));
         break;
       }
@@ -218,21 +268,14 @@ class Connection {
     }
 
     if (udp_len >= 48) {
-      uint32_t epoch = 0;
-      for (int i = 0; i < 4; ++i)
-        epoch = (epoch << 8) | packetBuffer[40 + i];
-
-      // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
-      epoch -= 2208988800UL;
-      ntp_time_ = uint64_t(epoch) << 8 | packetBuffer[44];
-      ntp_millis_ = millis_now;
+      ntp_time_.SetFromNtp(&packetBuffer[40]);
       ntp_valid_ = true;
     } else {
       (*this) << "NTP Invalid Length " << udp_len << "\n";
     }
   }
 
-  bool GetNtpHires(uint32_t *millis, uint64_t *time) const {
+  bool GetNtpHires(uint64_t *millis, HiResTime *time) const {
     if (!ntp_valid_)
       return false;
     *millis = ntp_millis_;
@@ -333,7 +376,7 @@ class Connection {
     rc = client.write(report_, report_ptr_);
     report_ptr_ = 0;
     /* wait for server reply */
-    unsigned long timeout = millis();
+    uint32_t timeout = millis();
     while (client.available() == 0) {
       if (millis() - timeout > 5000) {
         client.stop();
@@ -346,10 +389,10 @@ class Connection {
   constexpr static unsigned kLocalPort = 2390;
   bool connected_ = false;
   bool ntp_valid_ = false;
-  uint32_t ntp_millis_;
-  uint64_t ntp_time_;
+  uint64_t ntp_millis_ = 0;
+  HiResTime ntp_time_;
   int report_ptr_ = 0;
-  byte report_[256];
+  uint8_t report_[256];
 };
 
 static Connection *current_connection = nullptr;
@@ -616,8 +659,8 @@ class TimeManager : public InformationPage {
   void Update() {
     if (!current_connection)
       return;
-    uint32_t m;
-    uint64_t t;
+    uint64_t m;
+    HiResTime t;
     if (current_connection->GetNtpHires(&m, &t)) {
       AddSample(m, t);
     }
@@ -627,17 +670,17 @@ class TimeManager : public InformationPage {
 
   constexpr static uint32_t kMinSeconds = 50;
   constexpr static uint32_t kMaxSeconds = 3 * 86400 + 3600;
-  void AddSample(uint32_t sample_millis, uint64_t sample_time_t) {
+  void AddSample(uint64_t sample_millis, HiResTime sample_time_t) {
     if (!recent_samples_.empty()) {
-      uint32_t diff_time_t = sample_time_t - recent_samples_.begin()->first;
-      uint32_t diff_millis = sample_millis - recent_samples_.begin()->second;
-      if (diff_time_t / 256 >= kMinSeconds) {
+      HiResTime diff_time_t = sample_time_t - recent_samples_.begin()->first;
+      uint64_t diff_millis = sample_millis - recent_samples_.begin()->second;
+      if (diff_time_t.Seconds() >= kMinSeconds) {
         /* scale the millis to 1000000 seconds for Parts Per Billion */
-        int64_t diff_ms = 256 * int64_t(diff_millis) - 1000 * int64_t(diff_time_t);
-        int64_t diff_ppb = diff_ms * 1000000 / diff_time_t;
+        int64_t diff_ms = 256 * diff_millis - 1000 * diff_time_t.HiRes();
+        int64_t diff_ppb = diff_ms * 1000000 / diff_time_t.HiRes();
         if (current_connection)
           (*current_connection)
-              << "dtt: " << uint64_t(diff_time_t) * 1000 / 256 << " dmil: " << diff_millis
+              << "dtt: " << diff_time_t.HiRes() * 1000 / 256 << " dmil: " << diff_millis
               << " diff_ms: " << diff_ms / 256 << " diff_ppb: " << diff_ppb << "\n";
         emastat.Next(diff_ppb);
         if (current_connection) {
@@ -650,31 +693,33 @@ class TimeManager : public InformationPage {
     if (current_connection) {
       (*current_connection) << "Pre: ";
       for (const auto &item : recent_samples_)
-        (*current_connection) << "(" << uint32_t(item.first / 256) << "," << item.second
+        (*current_connection) << "(" << item.first.Seconds() << "," << item.second
                               << ") ";
       (*current_connection) << "\n";
     }
     if (recent_samples_.empty() ||
-        sample_time_t - std::prev(recent_samples_.end())->first >= kMinSeconds)
+        (sample_time_t - std::prev(recent_samples_.end())->first).Seconds() >=
+            kMinSeconds)
       recent_samples_.emplace(sample_time_t, sample_millis);
     while (recent_samples_.size() > 1 &&
-           sample_time_t - recent_samples_.begin()->first >= kMaxSeconds)
+           (sample_time_t - recent_samples_.begin()->first).Seconds() >= kMaxSeconds)
       recent_samples_.erase(recent_samples_.begin());
     if (current_connection) {
       (*current_connection) << "Post: ";
       for (const auto &item : recent_samples_)
-        (*current_connection) << "(" << uint32_t(item.first / 256) << ", " << item.second
+        (*current_connection) << "(" << item.first.Seconds() << ", " << item.second
                               << ") ";
       (*current_connection) << "\n";
     }
   }
 
-  /* TODO use EMA, track millis() rollover */
+  /* TODO use EMA */
   uint32_t GuessCurrentTime() {
     if (!ValidTime())
       return 0;
-    uint32_t now = std::prev(recent_samples_.end())->first / 256 + time_zone * 60 * 60;
-    now += (millis() - std::prev(recent_samples_.end())->second) / 1000;
+    uint32_t now =
+        std::prev(recent_samples_.end())->first.Seconds() + time_zone * 60 * 60;
+    now += (mr.LongMillis() - std::prev(recent_samples_.end())->second) / 1000;
     return now;
   }
 
@@ -683,7 +728,7 @@ class TimeManager : public InformationPage {
     char buf[20];
     EpochToUtc(GuessCurrentTime(), &y, &m, &d, &hh, &mm, &ss);
     u8g2->Reset();
-    u8g2->GetLineBuf(0) << "Millis: " << uint32_t(millis());
+    u8g2->GetLineBuf(0) << "Millis: " << mr.LongMillis();
     u8g2->GetLineBuf(1) << "Time Zone: " << time_zone;
     sprintf(buf, "%04d-%02d-%02d", y, m, d);
     u8g2->GetLineBuf(2) << "Date: " << buf;
@@ -693,7 +738,7 @@ class TimeManager : public InformationPage {
   }
 
  private:
-  std::map<uint64_t, uint32_t> recent_samples_;
+  std::map<HiResTime, uint64_t> recent_samples_; /* <time_t, millis> */
   EmaStat emastat;
 } tmgr;
 
@@ -716,7 +761,7 @@ class JobManager : public InformationPage {
         return;
       connection.Connect();
       connection.CallNtpServer();
-      connection << "Wakeup " << uint32_t(millis()) << "\n";
+      connection << "Wakeup " << mr.LongMillis() << "\n";
       current_connection = &connection;
       tmgr.Update();
       tried_connection = true;
@@ -774,7 +819,8 @@ class JobManager : public InformationPage {
     current_connection = nullptr;
     return true;
   }
-  void ShowInformationPage() override {
+
+  void ShowInformationPage() final {
     int y, m, d, hh, mm, ss;
     char buf[20];
     u8g2->Reset();
@@ -784,7 +830,7 @@ class JobManager : public InformationPage {
       if (it == pending_jobs_.end())
         break;
       EpochToUtc(*it, &y, &m, &d, &hh, &mm, &ss);
-      sprintf(buf, "%02d:%02d:%02d", hh, mm, ss);
+      sprintf(buf, "%02d:%02d:%02d %04d-%02d-%02d", hh, mm, ss, y, m, d);
       u8g2->GetLineBuf(i) << buf;
       ++it;
     }
@@ -796,6 +842,7 @@ class JobManager : public InformationPage {
     unsigned hour;
     unsigned minute;
   };
+
   void RepopulateJobs(uint32_t newer_than) {
     uint32_t now = tmgr.GuessCurrentTime();
     uint32_t past = now % 86400;
