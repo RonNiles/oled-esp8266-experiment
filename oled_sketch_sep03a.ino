@@ -403,7 +403,7 @@ static Connection *current_connection = nullptr;
  ***************************************************************************************/
 class JobInputOutput {
  public:
-  static void Setup() { pinMode(D8, INPUT_PULLUP); }
+  static void Setup() { pinMode(D8, INPUT); }
 
   static void ActivatePump(int32_t *level_reached_msec, int32_t *pump_off_msec) {
     pinMode(D5, INPUT);
@@ -668,8 +668,8 @@ class TimeManager : public InformationPage {
 
   bool ValidTime() const { return !recent_samples_.empty(); }
 
-  constexpr static uint32_t kMinSeconds = 50;
-  constexpr static uint32_t kMaxSeconds = 3 * 86400 + 3600;
+  constexpr static uint32_t kMinSeconds = 3600;
+  constexpr static uint32_t kMaxSeconds = 2 * 86400 + 3600;
   void AddSample(uint64_t sample_millis, HiResTime sample_time_t) {
     if (!recent_samples_.empty()) {
       HiResTime diff_time_t = sample_time_t - recent_samples_.begin()->first;
@@ -747,7 +747,7 @@ class TimeManager : public InformationPage {
  ***************************************************************************************/
 class JobManager : public InformationPage {
  public:
-  JobManager() { RegisterInformationPage(); }
+  JobManager(uint32_t wait_until) : wait_until_(wait_until) { RegisterInformationPage(); }
   bool RunJobs() {
     uint32_t current_millis = millis();
     int32_t remaining = int32_t(wait_until_ - current_millis);
@@ -880,7 +880,10 @@ void setup() {
   Connection::DisableWifi();
   JobInputOutput::Setup();
   u8g2 = new U8g2;
-  job_manager = new JobManager;
+
+  /* don't start connecting until 10 sec elapsed: makes less noise when changing power
+   * source after reprogram */
+  job_manager = new JobManager(millis() + 10000);
   EEPROM.begin(512);
   if (EEPROM.read(256) == 'T' && EEPROM.read(257) == 'Z')
     time_zone = int8_t(EEPROM.read(258));
