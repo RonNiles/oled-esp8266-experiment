@@ -184,7 +184,7 @@ bool operator<(const HiResTime &a, const HiResTime &b) {
  ***************************************************************************************/
 class Connection {
  public:
-  Connection() {}
+  Connection() { ReadWifiParameters(); }
   ~Connection() {
     if (connected_)
       DisableWifi();
@@ -203,7 +203,7 @@ class Connection {
 
     // Bring up the WiFi connection
     WiFi.mode(WIFI_STA);
-    WiFi.begin("ssid", "pwd");
+    WiFi.begin(wifi_parameters_.ssid, wifi_parameters_.password);
 
     for (int retries = 0;; ++retries) {
       if (WiFi.status() == WL_CONNECTED) {
@@ -382,6 +382,30 @@ class Connection {
         client.stop();
         break;
       }
+    }
+  }
+
+  struct WifiParameters {
+    char magic[2]; /* WP */
+    char ssid[20];
+    char password[20];
+  } wifi_parameters_;
+
+  void ReadWifiParameters() {
+    EEPROM.begin(512);
+    delay(10);
+    char *const p = reinterpret_cast<char *>(&wifi_parameters_);
+    for (int i = 0; i < sizeof(wifi_parameters_); ++i) {
+      p[i] = EEPROM.read(i);
+    }
+    if (memcmp(wifi_parameters_.magic, "WP", 2) != 0) {
+      memcpy(wifi_parameters_.magic, "WP", 2);
+      strcpy(wifi_parameters_.ssid, "ssid");
+      strcpy(wifi_parameters_.password, "password");
+      for (int i = 0; i < sizeof(wifi_parameters_); ++i) {
+        EEPROM.write(i, p[i]);
+      }
+      EEPROM.commit();
     }
   }
 
@@ -625,7 +649,7 @@ static void EpochToUtc(uint32_t epoch, int *y, int *m, int *d, int *hh, int *mm,
 }
 
 #define precision 1
-#define log_alpha 6
+#define log_alpha 4
 
 struct EmaStat {
   int64_t ema = 0;
@@ -728,7 +752,12 @@ class TimeManager : public InformationPage {
     char buf[20];
     EpochToUtc(GuessCurrentTime(), &y, &m, &d, &hh, &mm, &ss);
     u8g2->Reset();
-    u8g2->GetLineBuf(0) << "Millis: " << mr.LongMillis();
+    uint32_t uptime = uint32_t(mr.LongMillis() / 1000);
+    ldiv_t minutes = ldiv(uptime, 60);
+    ldiv_t hours = ldiv(minutes.quot, 60);
+    ldiv_t days = ldiv(hours.quot, 24);
+    sprintf(buf, "%u d %02u:%02u:%02u", days.quot, days.rem, hours.rem, minutes.rem);
+    u8g2->GetLineBuf(0) << "Up: " << buf;
     u8g2->GetLineBuf(1) << "Time Zone: " << time_zone;
     sprintf(buf, "%04d-%02d-%02d", y, m, d);
     u8g2->GetLineBuf(2) << "Date: " << buf;
